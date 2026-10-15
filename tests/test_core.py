@@ -1,0 +1,406 @@
+"""
+Tests for cg_hea_core. Run from the repository folder:
+
+    python3 -m unittest discover -s tests -v        (or: python3 -m pytest tests)
+
+Unit tests need only numpy. The integration tests (exact CG mapping in FCC and BCC,
+EAM, ADP and MEAM including erose_form = 1) run LAMMPS and are skipped when no `lmp` executable is found (set CG_HEA_LMP to
+point at one).
+"""
+import json, os, shutil, sys, tempfile, unittest
+
+import numpy as np
+
+sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), ".."))
+import cg_hea_core as core
+
+LMP = os.environ.get("CG_HEA_LMP") or core.find_lammps()
+
+
+def write(path, text):
+    with open(path, "w") as f:
+        f.write(text)
+
+
+def read(path):
+    with open(path) as f:
+        return f.read()
+
+
+def synthetic_setfl(path, names=("A", "B"), fs=False, Nr=500, Nrho=500, cut=5.5, adp=False):
+    """Smooth, physically shaped EAM tables (not a fitted potential) in setfl format;
+    adp=True appends dipole u(r) and quadrupole w(r) tables (ADP format)."""
+    nel = len(names)
+    r = np.linspace(0, cut, Nr)
+    dr = r[1]
+    rho_grid = np.linspace(0, 40, Nrho)
+    drho = rho_grid[1]
+    sw = np.where(r < cut, (1 - r / cut) ** 3, 0.0)                  # smooth cutoff
+    re = [2.50 + 0.12 * k for k in range(nel)]
+    with open(path, "w") as f:
+        f.write("synthetic test potential\nnot for production\n\n")
+        f.write(f"{nel} {' '.join(names)}\n{Nrho} {drho:.10e} {Nr} {dr:.10e} {cut:.10e}\n")
+        for k, nm in enumerate(names):
+            f.write(f"{k+1} {50.0 + 20*k:.4f} {re[k]*np.sqrt(2):.4f} fcc\n")
+            F = -(1.5 + 0.3 * k) * np.sqrt(rho_grid)
+            f.write("\n".join(f"{v:.12e}" for v in F) + "\n")
+            for j in range(nel if fs else 1):
+                rho = 3.0 * np.exp(-1.6 * (r / re[k] - 1)) * sw * (1 + 0.05 * j)
+                f.write("\n".join(f"{v:.12e}" for v in rho) + "\n")
+        for i in range(nel):
+            for j in range(i + 1):
+                rr = 0.5 * (re[i] + re[j])
+                rs = np.maximum(r, 0.5)
+                phi = (0.6 * np.exp(-6.0 * (rs / rr - 1)) - 1.1 * np.exp(-3.0 * (rs / rr - 1))) * sw
+                f.write("\n".join(f"{v:.12e}" for v in rs * phi) + "\n")
+        if adp:
+            for amp in (0.05, 0.02):                                   # u, then w
+                for i in range(nel):
+                    for j in range(i + 1):
+                        tab = amp * (1 + 0.1 * (i + j)) * np.exp(-r / 1.5) * sw
+                        f.write("\n".join(f"{v:.12e}" for v in tab) + "\n")
+
+
+MEAM_LIB = """# test library (Ni, W entries of the LAMMPS library.meam)
+'Ni'        'fcc'   12.     28           58.71
+4.99        2.45    2.20    6.00         2.20  3.52    4.45    0.94
+1.0         3.57            1.60         3.70          1.0    1
+'W'         'bcc'   8.      74           183.85
+5.62777409  3.978   1.00    1.00065894   1.00  3.165   8.66    0.98
+1.0         3.16          8.25         -2.7          1.      0
+"""
+
+
+class TestLattices(unittest.TestCase):
+    def test_counts_and_nearest_neighbours(self):
+        for kind, per, nn in (("fcc", 4, 1 / np.sqrt(2)), ("bcc", 2, np.sqrt(3) / 2)):
+            a, nc = 3.3, 3
+            pos = core.lattice(kind, a, nc)
+            self.assertEqual(len(pos), per * nc**3)
+            L = nc * a
+            d = pos[1:] - pos[0]
+            d -= L * np.round(d / L)
+            dist = np.linalg.norm(d, axis=1)
+            self.assertAlmostEqual(dist.min(), nn * a, places=10)
+            self.assertEqual(int(np.sum(np.isclose(dist, nn * a))), len(core.NN_OFFSETS[kind]))
+
+    def test_original_fcc_order_preserved(self):
+        base = np.array([[0, 0, 0], [.5, .5, 0], [.5, 0, .5], [0, .5, .5]])
+        g = np.stack(np.meshgrid(*[np.arange(3)]*3, indexing="ij"), -1).reshape(-1, 3)
+        ref = ((g[:, None, :] + base[None]).reshape(-1, 3) * 3.6)
+        np.testing.assert_allclose(core.fcc(3.6, 3), ref)
+
+    def test_vegard_volume_conversion(self):
+        ref = {"X": ("fcc", 3.6), "Y": ("bcc", 2.9)}
+        self.assertAlmostEqual(core.vegard_a0(ref, ["X"], [1], "fcc"), 3.6)
+        self.assertAlmostEqual(core.vegard_a0(ref, ["X"], [1], "bcc"), (2 * 3.6**3 / 4) ** (1/3))
+        v = 0.5 * 3.6**3 / 4 + 0.5 * 2.9**3 / 2
+        self.assertAlmostEqual(core.vegard_a0(ref, ["X", "Y"], [1, 1], "bcc"), (2 * v) ** (1/3))
+        self.assertIsNone(core.vegard_a0({"Z": ("b1", 4.0)}, ["Z"], [1], "fcc"))
+
+
+class TestChemistry(unittest.TestCase):
+    def test_exact_counts(self):
+        rng = np.random.default_rng(0)
+        for N, comp in ((1000, [0.29, 0.71]), (10, [0.4, 0.35, 0.25]), (32001, [0.2] * 5)):
+            t = core.assign_species(N, comp, rng)
+            counts = np.bincount(t, minlength=len(comp) + 1)[1:]
+            self.assertEqual(counts.sum(), N)
+            self.assertTrue(np.all(np.abs(counts - np.array(comp) / sum(comp) * N) < 1))
+
+    def test_entropy_classes(self):
+        self.assertIn("HEA", core.entropy_class([1] * 5)[1])
+        self.assertIn("MEA", core.entropy_class([1] * 3)[1])
+        self.assertIn("low", core.entropy_class([1, 1])[1])
+        self.assertEqual(core.entropy_class([0.3, 0.3, 0.3, 0.1])[2], 4)
+
+
+class TestEAMRescaling(unittest.TestCase):
+    def setUp(self):
+        self.tmp = tempfile.mkdtemp()
+
+    def tearDown(self):
+        shutil.rmtree(self.tmp)
+
+    def _roundtrip(self, fs):
+        src = os.path.join(self.tmp, "ab.eam.fs" if fs else "ab.eam.alloy")
+        synthetic_setfl(src, fs=fs)
+        info = core.load_potential("eamfs" if fs else "eam", potential=src)
+        n = 3
+        pair = core.rescale_potential(info, n, self.tmp, ["A", "B"])
+        d0 = core.read_setfl(src, fs=fs)
+        d1 = core.read_setfl(os.path.join(self.tmp, pair.cg_files[0]), fs=fs)
+        self.assertAlmostEqual(d1["dr"], n * d0["dr"], places=12)
+        self.assertAlmostEqual(d1["cut"], n * d0["cut"], places=12)
+        self.assertEqual(d1["drho"], d0["drho"])
+        for e0, e1 in zip(d0["E"], d1["E"]):
+            self.assertAlmostEqual(e1["mass"], n**3 * e0["mass"], places=6)
+            np.testing.assert_allclose(e1["F"], n**3 * e0["F"], rtol=1e-14)
+            for r0, r1 in zip(e0["rho"], e1["rho"]):
+                np.testing.assert_allclose(r1, r0, rtol=1e-14)
+        for z0, z1 in zip(d0["z2r"], d1["z2r"]):
+            np.testing.assert_allclose(z1, n**4 * z0, rtol=1e-14)
+        self.assertEqual(pair.coeff("cg", ["B", "A"]), f"pair_coeff * * {pair.cg_files[0]} B A")
+
+    def test_alloy(self):
+        self._roundtrip(False)
+
+    def test_adp(self):
+        src = os.path.join(self.tmp, "ab.adp")
+        synthetic_setfl(src, adp=True)
+        self.assertEqual(core.detect_pair_style(src), "adp")
+        info = core.load_potential("adp", potential=src)
+        n = 4
+        pair = core.rescale_potential(info, n, self.tmp, ["A", "B"])
+        self.assertEqual(pair.style, "pair_style adp")
+        d0 = core.read_setfl(src)
+        d1 = core.read_setfl(os.path.join(self.tmp, pair.cg_files[0]))
+        self.assertEqual(d1["kind"], "adp")
+        for a, b in zip(d0["u"], d1["u"]):
+            np.testing.assert_allclose(b, np.sqrt(n) * a, rtol=1e-14)
+        for a, b in zip(d0["w"], d1["w"]):
+            np.testing.assert_allclose(b, a / np.sqrt(n), rtol=1e-14)
+        with self.assertRaises(core.PotentialError):
+            core.load_potential("eam", potential=src)          # ADP given as eam/alloy
+
+    def test_fortran_exponents(self):
+        src = os.path.join(self.tmp, "d.eam.alloy")
+        synthetic_setfl(src)
+        write(src, read(src).replace("e-0", "D-0"))
+        d = core.read_setfl(src)
+        self.assertTrue(np.all(np.isfinite(d["E"][0]["F"])))
+
+    def test_fs(self):
+        self._roundtrip(True)
+
+    def test_flavour_detection_and_errors(self):
+        src = os.path.join(self.tmp, "x.setfl")
+        synthetic_setfl(src, fs=True)
+        self.assertEqual(core.detect_pair_style(src), "eamfs")
+        with self.assertRaises(core.PotentialError):
+            core.load_potential("eam", potential=src)          # fs file given as eam/alloy
+        bad = os.path.join(self.tmp, "bad.eam.alloy")
+        write(bad, "not\na\npotential\n")
+        with self.assertRaises(core.PotentialError):
+            core.load_potential("eam", potential=bad)
+
+
+class TestMEAMRescaling(unittest.TestCase):
+    def setUp(self):
+        self.tmp = tempfile.mkdtemp()
+        self.lib = os.path.join(self.tmp, "lib.meam")
+        write(self.lib, MEAM_LIB)
+
+    def tearDown(self):
+        shutil.rmtree(self.tmp)
+
+    def test_library_and_params(self):
+        par = os.path.join(self.tmp, "NiW.meam")
+        write(par, "# no rc here: LAMMPS default 4.0 must be rescaled too\n"
+                             "Ec(1,2) = 6.0\nre(1,2) = 2.6\ndelta(1,2) = 0.1\n"
+                             "alpha(1,2) = 5.0\nzbl(1,1) = 1\nnn2(1,2) = 1\n")
+        info = core.load_potential("meam", library=self.lib, params=par)
+        self.assertEqual(info.elements, ["Ni", "W"])
+        self.assertEqual(info.param_index_max, 2)
+        self.assertEqual(core.classify_meam_file(par), "params")
+        self.assertEqual(core.classify_meam_file(self.lib), "library")
+        n = 4
+        pair = core.rescale_potential(info, n, self.tmp, ["W", "Ni"])
+        self.assertEqual(pair.lib_elements, ["Ni", "W"])        # library order (dedicated library)
+        lib1 = core.read_meam_library(os.path.join(self.tmp, pair.cg_files[0]))
+        for e0, e1 in zip(core.read_meam_library(self.lib), lib1):
+            self.assertAlmostEqual(float(e1["atwt"]), n**3 * float(e0["atwt"]))
+            self.assertAlmostEqual(float(e1["esub"]), n**3 * float(e0["esub"]))
+            self.assertAlmostEqual(float(e1["alat"]), n * float(e0["alat"]))
+            self.assertEqual(e1["alpha"], e0["alpha"])
+        txt = read(os.path.join(self.tmp, pair.cg_files[1]))
+        for line in ("Ec(1,2) = 384.0", "re(1,2) = 10.4", "delta(1,2) = 6.4", "alpha(1,2) = 5.0",
+                     "rc = 16.0", "delr = 0.4", "zbl(1,1) = 0", "zbl(1,2) = 0", "zbl(2,2) = 0"):
+            self.assertIn(line, txt)
+        self.assertNotIn("zbl(1,1) = 1", txt)
+        aa0 = read(os.path.join(self.tmp, pair.aa0_files[1]))
+        self.assertIn("Ec(1,2) = 6.0", aa0)
+        self.assertIn("zbl(2,2) = 0", aa0)
+        self.assertEqual(pair.coeff("aa", ["W"]), "pair_coeff * * lib.meam Ni W NiW.meam W")
+
+    def test_no_parameter_file(self):
+        info = core.load_potential("meam", library=self.lib)
+        pair = core.rescale_potential(info, 2, self.tmp, ["Ni"], ["Ni", "W"])
+        self.assertEqual(pair.aa_files[1], "NULL")
+        txt = read(os.path.join(self.tmp, pair.cg_files[1]))
+        self.assertIn("rc = 8.0", txt)
+        self.assertIn("zbl(1,2) = 0", txt)
+
+    def test_erose_form_1_repuls_is_a_length(self):
+        for form, repuls in ((0, 0.3), (1, 0.9), (2, 0.3)):      # n = 3
+            par = os.path.join(self.tmp, f"f{form}.meam")
+            write(par, f"erose_form = {form}\nrepuls(1,1) = 0.3\nattrac(1,1) = 0.1\n")
+            info = core.load_potential("meam", library=self.lib, params=par)
+            self.assertEqual(info.erose_form, form)
+            pair = core.rescale_potential(info, 3, self.tmp, ["Ni"], ["Ni", "W"])
+            cg = {k + idx: core._num(v) for k, idx, v, _ in
+                  core.parse_meam_params(os.path.join(self.tmp, pair.cg_files[1]))}
+            self.assertAlmostEqual(cg["repuls(1,1)"], repuls)
+            self.assertAlmostEqual(cg["attrac(1,1)"], 0.1)
+
+    def test_strict_parameter_parsing(self):
+        for bad in ("foo(1,1) = 2.0\n", "Ec(1,1) 4.0\n", "Ec(0,1) = 4.0\n"):
+            par = os.path.join(self.tmp, "bad.meam")
+            write(par, bad)
+            with self.assertRaises(core.PotentialError):
+                core.load_potential("meam", library=self.lib, params=par)
+
+    def test_zbl_detection(self):
+        par = os.path.join(self.tmp, "z.meam")
+        write(par, "zbl(1,1) = 0\nzbl(1,2) = 0\n")
+        e = core.parse_meam_params(par)
+        self.assertEqual(core.meam_zbl_active(e, 2), [(2, 2)])  # default is on
+        write(par, "zbl(1,1) = 0\nzbl(1,2) = 0\nzbl(2,2) = 0\n")
+        self.assertEqual(core.meam_zbl_active(core.parse_meam_params(par), 2), [])
+
+    def test_index_beyond_element_list(self):
+        par = os.path.join(self.tmp, "p.meam")
+        write(par, "Ec(1,3) = 5.0\n")
+        info = core.load_potential("meam", library=self.lib, params=par)
+        with self.assertRaises(core.PotentialError):
+            core.rescale_potential(info, 2, self.tmp, ["Ni"], ["Ni", "W"])
+
+
+class TestGeometry(unittest.TestCase):
+    def test_density_target(self):
+        for kind in ("fcc", "bcc"):
+            for phase in ("network", "sheet"):
+                g = core.build_geometry(kind, 10.0, 12, "gyroid", 1, phase, density=0.3)
+                self.assertAlmostEqual(g.fill, 0.3, delta=0.005)
+                self.assertEqual(g.phase, phase)
+
+    def test_auto_phase_matches_original(self):
+        g = core.build_geometry("fcc", 10.0, 10, "gyroid", 1, "auto", 0.0)
+        self.assertEqual((g.phase, g.level), ("network", 0.0))
+        g = core.build_geometry("fcc", 10.0, 10, "gyroid", 1, "auto", 0.3)
+        self.assertEqual(g.phase, "sheet")
+
+    def test_prune_removes_isolated_beads(self):
+        for kind in ("fcc", "bcc"):
+            idx = core.lattice_index(kind, 4)              # half-lattice indices 0..7
+            keep = idx[:, 0] < 4                           # solid slab x < L/2
+            j = int(np.flatnonzero(idx[:, 0] == 6)[0])     # a bead in the middle of the gap
+            keep[j] = True
+            c = core.coordination(idx, keep, kind, 4)
+            self.assertEqual(c[j], 0)
+            k2, removed = core.prune(idx, keep, kind, 4, 3)
+            self.assertFalse(k2[j])
+            self.assertEqual(removed, 1)                   # the slab itself is untouched
+
+    def test_full_lattice_coordination(self):
+        for kind in ("fcc", "bcc"):
+            idx = core.lattice_index(kind, 3)
+            c = core.coordination(idx, np.ones(len(idx), bool), kind, 3)
+            self.assertTrue(np.all(c == len(core.NN_OFFSETS[kind])))
+
+
+class TestConfig(unittest.TestCase):
+    def test_json_and_cli(self):
+        cfg = core.Config(pair="eam", potential="x.eam.alloy", elements=["Fe", "Ni"],
+                          composition=[0.6, 0.4], lattice="bcc", density=0.3, crush=True)
+        with tempfile.TemporaryDirectory() as d:
+            p = os.path.join(d, "c.json")
+            cfg.to_json(p)
+            self.assertEqual(core.Config.from_json(p), cfg)
+        cli = cfg.to_cli()
+        for frag in ("--lattice bcc", "--density 0.3", "--crush", "--composition 0.6 0.4"):
+            self.assertIn(frag, cli)
+
+    def test_validation(self):
+        with self.assertRaises(ValueError):
+            core.Config(elements=["A"], lattice="hcp").validate()
+        with self.assertRaises(ValueError):
+            core.Config(elements=["A"], phase="sheet", t=0).validate()
+        with self.assertRaises(ValueError):
+            core.Config(elements=["A"], seed=0).validate()
+        with self.assertRaises(ValueError):
+            core.Config(elements=["A"], crush=True, crush_strain=1.2).validate()
+        with self.assertRaises(ValueError):
+            core.Config(elements=["A"], box_nm=-3).validate()
+
+
+@unittest.skipUnless(LMP, "LAMMPS executable not found")
+class TestPipelineLAMMPS(unittest.TestCase):
+    """Exact-mapping verification through the full pipeline."""
+
+    def setUp(self):
+        self.tmp = tempfile.mkdtemp()
+        self.pot = os.path.join(self.tmp, "AB.eam.alloy")
+        synthetic_setfl(self.pot)
+
+    def tearDown(self):
+        shutil.rmtree(self.tmp)
+
+    def _run(self, kind, pair="eam", pot=None, **kw):
+        cfg = core.Config(pair=pair, potential=pot or self.pot, elements=["A", "B"],
+                          lattice=kind, n=3, auto_a0=True, verify=True, cells=6, lmp=LMP,
+                          outdir=os.path.join(self.tmp, f"{kind}_{pair}"), crush=True)
+        for k, v in kw.items():
+            setattr(cfg, k, v)
+        out = []
+        s = core.run_pipeline(cfg, core.Session(log=out.append))
+        self.assertTrue(s["verify"]["passed"], "\n".join(out))
+        self.assertLess(s["verify"]["static_dev"], 1e-10)
+        self.assertTrue(s["n_beads"] > 0)
+        run = read(os.path.join(s["outdir"], s["run_input"]))
+        self.assertIn(f"temp {27*300:.1f}", run)
+        self.assertIn("equal c_prs[3]*1.0e-4", run)          # compression positive
+        self.assertNotIn("-c_prs", run)
+        self.assertIn("write_restart", run)
+        summ = json.loads(read(os.path.join(s["outdir"], s["prefix"] + "_summary.json")))
+        self.assertEqual(summ["lattice"], kind)
+        self.assertEqual(summ["type_to_element"], {"1": "A", "2": "B"})
+        return s
+
+    def test_fcc(self):
+        self._run("fcc")
+
+    def test_bcc_box_nm(self):
+        s = self._run("bcc", box_nm=9.0)
+        self.assertGreaterEqual(s["box"], 90.0)
+        self.assertLess(s["box"] - s["a_cg"], 90.0)
+
+    def test_adp(self):
+        pot = os.path.join(self.tmp, "AB.adp")
+        synthetic_setfl(pot, adp=True)
+        self._run("fcc", pair="adp", pot=pot)
+
+    def test_meam_erose_form_1(self):
+        lib = os.path.join(self.tmp, "lib.meam")
+        par = os.path.join(self.tmp, "NiW.meam")
+        write(lib, MEAM_LIB)
+        write(par, "erose_form = 1\nrc = 4.5\nrepuls(1,1) = 0.3\nattrac(1,1) = 0.05\n"
+                   "repuls(1,2) = 0.2\nzbl(1,1) = 0\nzbl(1,2) = 0\nzbl(2,2) = 0\n")
+        cfg = core.Config(pair="meam", library=lib, params=par, lib_elements=["Ni", "W"],
+                          elements=["Ni"], lattice="fcc", n=3, auto_a0=True, verify=True,
+                          cells=4, lmp=LMP, outdir=os.path.join(self.tmp, "meam"))
+        out = []
+        s = core.run_pipeline(cfg, core.Session(log=out.append))
+        self.assertTrue(s["verify"]["passed"], "\n".join(out))
+        self.assertIsNone(s["verify"]["zbl_effect"])         # ZBL already off in the original
+
+    def test_wrong_rescaling_is_caught(self):
+        good = core.write_setfl
+
+        def broken(path, d, n):                               # embedding energy 0.1 % off
+            d = dict(d, E=[dict(e, F=e["F"] * 1.001) for e in d["E"]])
+            good(path, d, n)
+        core.write_setfl = broken
+        try:
+            cfg = core.Config(pair="eam", potential=self.pot, elements=["A", "B"], n=3,
+                              a0=3.6, verify=True, cells=4, lmp=LMP,
+                              outdir=os.path.join(self.tmp, "broken"))
+            with self.assertRaises(core.VerificationError):
+                core.run_pipeline(cfg, core.Session(log=lambda *_: None))
+            self.assertFalse(any(f.endswith("_run.in") for f in os.listdir(cfg.outdir)))
+        finally:
+            core.write_setfl = good
+
+
+if __name__ == "__main__":
+    unittest.main()

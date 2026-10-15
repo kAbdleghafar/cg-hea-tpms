@@ -1,0 +1,5 @@
+numpy>=1.22
+# optional: geometry preview and stress-strain plot in the GUI
+matplotlib>=3.6
+# optional: a LAMMPS executable (lmp) for a0 relaxation, verification and running
+# lammps

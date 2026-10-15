@@ -1,0 +1,23 @@
+cff-version: 1.2.0
+message: >-
+  If you use this software, please cite it as below, together with the
+  coarse-graining method it implements: Chalamet, Rodney and Shibuta,
+  Computational Materials Science 228 (2023) 112306.
+title: "CG-HEA TPMS Builder: coarse-grained TPMS lattices of FCC and BCC high- and medium-entropy alloys"
+type: software
+authors:
+  - given-names: Khaled
+    family-names: Abdelghafar
+license: MIT
+repository-code: "https://github.com/kAbdleghafar/cg-hea-tpms"
+version: 1.0.0
+date-released: 2026-10-15
+keywords:
+  - coarse-grained molecular dynamics
+  - high-entropy alloys
+  - TPMS
+  - architected materials
+  - LAMMPS
+  - EAM
+  - MEAM
+  - ADP
