@@ -139,9 +139,18 @@ between 0.75 % and 2.5 %. They were tested on ~26,000-atom Ti-Zr-Nb gyroids at 3
 
 Check every stress-strain curve anyway.
 
-`--matrix` reads an orthogonal `atom_style atomic` data file (image flags and Velocities are
-fine), keeps the atoms inside the TPMS solid, and scales the box by n. The composition is taken
-from the file. In the GUI the same option is under ③ *Solid to carve the TPMS from*. `--analyze`
+`--matrix` reads an orthogonal LAMMPS data file: atom_style atomic, charge, molecular or full,
+as written by LAMMPS, OVITO or Atomsk. Image flags and Velocities are fine. It keeps the atoms
+inside the TPMS solid and scales the box by n.
+- **Composition:** taken from the file's atom types by default. With
+  `--matrix-species random --composition …`, a pure template (for example an Atomsk polycrystal
+  of one element) is first alloyed at random. This happens over the whole structure and before
+  carving, so the bulk and every lattice of a given seed share exactly the same species on the
+  same sites.
+- **Non-cubic boxes:** the TPMS unit cells stay cubic. A 30 × 30 × 10 nm box gets 3 × 3 × 1
+  cells of 10 nm.
+- **Equilibration:** NPT equilibration is anisotropic (`aniso`), which suits textured
+  polycrystals. In the GUI the same option is under ③ *Solid to carve the TPMS from*. `--analyze`
 fits the apparent Young's modulus of each run, with its relative density. The elastic modulus
 is size-independent, so it is the property that transfers best through the CG map.
 

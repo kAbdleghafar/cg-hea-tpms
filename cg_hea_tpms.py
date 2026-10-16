@@ -99,6 +99,10 @@ def build_parser():
                     help="carve the TPMS out of this LAMMPS data file (atom_style atomic, "
                          "orthogonal box), e.g. your polycrystal; its atom types must follow "
                          "--elements; it is scaled by n (use -n 1 to stay atomistic)")
+    ap.add_argument("--matrix-species", choices=["file", "random"],
+                    help="file (default): keep the data file's atom types; random: assign "
+                         "--elements at --composition at random over the whole matrix first "
+                         "(alloys a pure template, e.g. an Atomsk polycrystal)")
     ap.add_argument("--analyze", nargs="+", metavar="STRESS_STRAIN",
                     help="fit the apparent Young's modulus of *_stress_strain.txt files and exit")
     ap.add_argument("--fit-window", nargs=2, type=float, default=(0.0075, 0.025),

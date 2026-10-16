@@ -682,9 +682,14 @@ def build_geometry(kind, a_cg, cells, surface, periods=1, phase="auto", t=0.0,
     return Geometry(pos[keep], keep, L, phase, level, float(keep.mean()), surf, removed, len(idx))
 
 
+DATA_STYLES = {"atomic": (1, 2), "charge": (1, 3), "molecular": (2, 3), "bond": (2, 3),
+               "angle": (2, 3), "full": (2, 4)}     # style -> (type column, first x column)
+
+
 def read_lammps_data(path):
-    """Minimal reader for orthogonal, atom_style atomic LAMMPS data files (e.g. a polycrystal
-    built with Atomsk or LAMMPS). Positions are wrapped into the box and shifted to start at 0."""
+    """Minimal reader for orthogonal LAMMPS data files (atom_style atomic, charge, molecular or
+    full; e.g. a polycrystal built with Atomsk, LAMMPS or OVITO). Positions are wrapped into the
+    box and shifted to start at 0."""
     name = os.path.basename(path)
     try:
         lines = _read(path).splitlines()
@@ -721,11 +726,14 @@ def read_lammps_data(path):
         if key == "Masses":
             masses = {int(r[0]): float(r[1]) for r in rows}
         elif key == "Atoms":
-            style = head.split("#")[1].strip() if "#" in head else "atomic"
-            if style != "atomic":
-                raise ValueError(f"{name}: atom_style '{style}' - only 'atomic' data files are "
-                                 f"supported (write_data from an atom_style atomic run)")
-            a = np.array([r[:5] for r in rows], float)
+            style = head.split("#")[1].strip() if "#" in head else None
+            if style is None:                       # no style comment: infer from column count
+                style = "atomic" if len(rows[0]) in (5, 8) else None
+            if style not in DATA_STYLES:
+                raise ValueError(f"{name}: atom_style '{style}' is not supported (use atomic, "
+                                 f"charge, molecular or full, and keep the '# style' comment)")
+            tc, xc = DATA_STYLES[style]
+            a = np.array([[r[0], r[tc], r[xc], r[xc + 1], r[xc + 2]] for r in rows], float)
             if len(a) != natoms:
                 raise ValueError(f"{name}: {len(a)} atom lines, header says {natoms}")
             a = a[np.argsort(a[:, 0])]
@@ -738,13 +746,24 @@ def read_lammps_data(path):
     pos = np.mod(pos - lo, L)
     if types.min() < 1 or types.max() > ntypes:
         raise ValueError(f"{name}: atom types outside 1..{ntypes}")
-    return dict(pos=pos, types=types, box=L, ntypes=ntypes, masses=masses, name=name)
+    return dict(pos=pos, types=types, box=L, ntypes=ntypes, masses=masses, name=name,
+                style=style)
+
+
+def tpms_periods(L, periods):
+    """Periods along x, y, z that keep the TPMS unit cell cubic: `periods` cells along the
+    shortest box edge, the nearest whole number along the others."""
+    L = np.asarray(L, float)
+    cell = L.min() / periods
+    return np.maximum(1, np.round(L / cell)).astype(int), cell
 
 
 def carve_matrix(mat, surface, periods=1, phase="auto", t=0.0, density=None):
-    """Keep the atoms of an existing structure that lie in the TPMS solid (box-relative)."""
+    """Keep the atoms of an existing structure that lie in the TPMS solid. The TPMS unit cell
+    stays cubic in a non-cubic box (see tpms_periods). Returns keep, phase, level, periods."""
     pos, L = mat["pos"], mat["box"]
-    f = SURFACES[surface](*(TWO_PI * periods * pos[:, k] / L[k] for k in range(3)))
+    pk, _ = tpms_periods(L, periods)
+    f = SURFACES[surface](*(TWO_PI * pk[k] * pos[:, k] / L[k] for k in range(3)))
     phase, level = resolve_phase(phase, t)
     if density:
         if phase == "auto":
@@ -753,7 +772,7 @@ def carve_matrix(mat, surface, periods=1, phase="auto", t=0.0, density=None):
     if phase == "sheet" and level <= 0:
         raise ValueError("sheet TPMS needs a positive thickness level t (or a target density)")
     keep = solid_mask(f, phase, level)
-    return keep, phase, level
+    return keep, phase, level, pk
 
 
 def fit_modulus(path, lo=0.002, hi=0.01):
@@ -798,6 +817,8 @@ class Config:
     min_coord: int = 0
     matrix: str = None                # carve the TPMS from this LAMMPS data file (e.g. your
                                       # polycrystal; types in --elements order), scaled by n
+    matrix_species: str = "file"      # file: keep its atom types; random: assign --elements at
+                                      # --composition randomly over the whole matrix first
     temp: float = 300.0
     dt_aa: float = 0.001
     dt_cg: float = None               # CG timestep override, ps (default n*dt_aa = exact map)
@@ -842,6 +863,8 @@ class Config:
             err.append("target relative density must be in (0, 1]")
         if self.phase == "sheet" and self.t <= 0 and not self.density:
             err.append("sheet TPMS needs t > 0 or a target density")
+        if self.matrix_species not in ("file", "random"):
+            err.append("matrix_species must be 'file' or 'random'")
         if self.crush_axis not in ("x", "y", "z"):
             err.append("crush axis must be x, y or z")
         if self.a0 is not None and self.a0 <= 0:
@@ -902,6 +925,8 @@ class Config:
             a.append(f"--min-coord {self.min_coord}")
         if self.matrix:
             a.append(f"--matrix {q(self.matrix)}")
+            if self.matrix_species != "file":
+                a.append(f"--matrix-species {self.matrix_species}")
         a += [f"--temp {self.temp:g}", f"--dt-aa {self.dt_aa:g}", f"--equil {self.equil}"]
         a += [f"--{k.replace('_', '-')} {getattr(self, k):g}" for k in ("dt_cg", "tdamp", "pdamp")
               if getattr(self, k)]
@@ -1112,9 +1137,15 @@ def run_pipeline(cfg: Config, session: Session = None):
     mat = None
     if cfg.matrix:
         mat = read_lammps_data(cfg.matrix)
-        if mat["ntypes"] != len(els):
+        if cfg.matrix_species == "random":
+            # alloy the template before carving, so bulk and lattices share one species field
+            mat["types"] = assign_species(len(mat["types"]), cfg.fractions(),
+                                          np.random.default_rng(cfg.seed + 7))
+            mat["ntypes"] = len(els)
+        elif mat["ntypes"] != len(els):
             raise ValueError(f"{mat['name']} has {mat['ntypes']} atom types but {len(els)} "
-                             f"elements were given (list them in the file's type order)")
+                             f"elements were given (list them in the file's type order, or use "
+                             f"matrix_species='random' to alloy a template)")
         if cfg.composition is None:
             cfg.composition = [float(np.mean(mat["types"] == k)) for k in range(1, len(els) + 1)]
     comp = cfg.fractions()
@@ -1298,15 +1329,20 @@ def run_pipeline(cfg: Config, session: Session = None):
     # 4. CG lattice + TPMS mask + random species (or carve an existing structure)
     S.check()
     if mat is not None:
-        keep, phase, level = carve_matrix(mat, cfg.surface, cfg.periods, cfg.phase, cfg.t,
-                                          cfg.density)
+        keep, phase, level, pk = carve_matrix(mat, cfg.surface, cfg.periods, cfg.phase, cfg.t,
+                                              cfg.density)
         if not keep.any():
             raise ValueError("the TPMS mask removed every atom - raise t or the target density")
         pos, types, Lv = mat["pos"][keep] * n, mat["types"][keep], mat["box"] * n
         fill, surf, pruned, cells = float(keep.mean()), None, 0, None
         if np.ptp(mat["box"]) > 0.01 * mat["box"].max():
-            log(f"     note: the matrix box is not cubic {np.round(mat['box'], 2)} Å - the TPMS "
-                f"is stretched with it")
+            cellv = mat["box"] / pk
+            log(f"     non-cubic matrix box {' x '.join(f'{x/10:.1f}' for x in mat['box'])} nm: "
+                f"{pk[0]} x {pk[1]} x {pk[2]} TPMS cells of {' x '.join(f'{c/10:.2f}' for c in cellv)} nm"
+                + ("" if np.ptp(cellv) < 0.01 * cellv.max() else "  (not exactly cubic)"))
+        if cfg.matrix_species == "random":
+            log(f"     species assigned at random over the matrix (seed {cfg.seed + 7}) before "
+                f"carving: {' '.join(f'{e} {100*c:.4g}' for e, c in zip(els, comp))} at.%")
         src = f"carved from {mat['name']} ({len(keep):,} atoms" + (f", scaled x{n}" if n > 1 else "") + ")"
     else:
         cells = max(1, math.ceil(cfg.box_nm * 10 / a_cg - 1e-9)) if cfg.box_nm else cfg.cells
@@ -1339,7 +1375,8 @@ def run_pipeline(cfg: Config, session: Session = None):
     log(f"     exact atomistic equivalent: same cell at {L/n/10:.1f} nm edge")
     summary.update(prefix=pre, n_beads=len(pos), cells=cells, box=L, box_vector=Lv.tolist(),
                    fill=fill, phase=phase, level=level, surface_fraction=surf,
-                   matrix=cfg.matrix,
+                   matrix=cfg.matrix, matrix_species=cfg.matrix_species,
+                   tpms_periods=(pk.tolist() if mat is not None else [cfg.periods] * 3),
                    type_to_element={str(i + 1): e for i, e in enumerate(els)},
                    counts={e: int(np.sum(types == i + 1)) for i, e in enumerate(els)},
                    interpretation=f"exact similarity map: this CG cell behaves like an atomistic "
@@ -1397,7 +1434,7 @@ timestep       {dt:g}
 
 # ── Stage 2: NPT equilibration at physical {cfg.temp:.0f} K (periodic TPMS, 0 bar) ──
 velocity       all create {Tcg:.1f} {cfg.seed} mom yes rot yes dist gaussian
-fix            eq all npt temp {Tcg:.1f} {Tcg:.1f} {tdamp:.6g} iso 0.0 0.0 {pdamp:.6g}
+fix            eq all npt temp {Tcg:.1f} {Tcg:.1f} {tdamp:.6g} aniso 0.0 0.0 {pdamp:.6g}
 compute        pe_t all pe/atom
 variable       Tphys equal temp/{n**3}
 thermo         200

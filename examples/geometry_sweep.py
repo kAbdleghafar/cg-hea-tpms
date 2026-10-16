@@ -47,7 +47,9 @@ def generate(a):
             cfg = core.Config(pair=a.pair, potential=a.potential or "", library=a.library or "",
                               params=a.params or "", lib_elements=a.lib_elements,
                               elements=a.elements, lattice=a.lattice, n=a.n, a0=a.a0,
-                              matrix=a.matrix, surface="gyroid" if surf == "bulk" else surf,
+                              matrix=a.matrix, matrix_species=a.matrix_species,
+                              composition=a.composition,
+                              surface="gyroid" if surf == "bulk" else surf,
                               phase=phase, density=dens, temp=a.temp, dt_aa=a.dt_aa,
                               equil=a.equil, crush=True, crush_strain=a.strain,
                               strain_rate=a.rate, crush_axis=a.axis, seed=seed, lmp=a.lmp,
@@ -131,6 +133,11 @@ def main():
     g.add_argument("--lib-elements", nargs="+")
     g.add_argument("--elements", nargs="+", required=True, help="element of type 1, 2, ...")
     g.add_argument("--matrix", required=True, help="bulk reference structure (LAMMPS data)")
+    g.add_argument("--matrix-species", default="file", choices=["file", "random"],
+                   help="random: alloy a pure template at --composition before carving "
+                        "(the same arrangement for the bulk and every lattice of a seed)")
+    g.add_argument("--composition", nargs="+", type=float,
+                   help="at.%% or fractions per element (with --matrix-species random)")
     g.add_argument("--lattice", default="bcc", choices=list(core.LATTICES))
     g.add_argument("-n", type=int, default=1, help="CG level (1 = atomistic)")
     g.add_argument("--a0", type=float, default=None, help="only used for the neighbour skin")

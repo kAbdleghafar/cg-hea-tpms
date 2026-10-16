@@ -192,6 +192,7 @@ class App:
         self.cells, self.periods = S(value="20"), S(value="1")
         self.box_mode, self.box_nm = S(value="cells"), S(value="30")
         self.matrix_mode, self.matrix_path, self.matrix_types = S(value="lattice"), S(), S()
+        self.matrix_random = B(value=False)
         self.dt_cg, self.tdamp, self.pdamp = S(), S(), S()
         self.phase = S(value="network")
         self.thick_mode = S(value="density")
@@ -715,6 +716,12 @@ class App:
         ttk.Entry(mf, textvariable=self.matrix_path, width=50).grid(row=2, column=0, sticky="we",
                                                                     padx=(22, 4), pady=2)
         ttk.Button(mf, text="Browse…", command=self._browse_matrix).grid(row=2, column=1)
+        c = ttk.Checkbutton(mf, text="Re-assign species at random with the composition of step ② "
+                                     "(for a pure template, e.g. an Atomsk polycrystal)",
+                            variable=self.matrix_random, command=self._refresh)
+        c.grid(row=5, column=0, columnspan=2, sticky="w", padx=(22, 4), pady=(4, 0))
+        Tooltip(c, "Alloys the whole structure first, then carves it, so the bulk reference and "
+                   "every lattice share one species arrangement. The file's own types are ignored.")
         lab = ttk.Label(mf, text="Atom types 1, 2, … in the file are")
         lab.grid(row=3, column=0, sticky="w", padx=(22, 4), pady=2)
         e = ttk.Entry(mf, textvariable=self.matrix_types, width=24)
@@ -991,8 +998,12 @@ class App:
                     self.est[k].config(text="—")
                 self.est["box"].config(text=f"matrix: {err}")
                 return
-            self.est["lat"].config(text=f"carved from {mat['name']} ({len(mat['pos']):,} atoms, "
-                                        f"{mat['ntypes']} types)" + (f", scaled ×{n}" if n > 1 else ""))
+            pk, _ = core.tpms_periods(mat["box"], self._f(self.periods, int) or 1)
+            self.est["lat"].config(text=f"carved from {mat['name']} ({len(mat['pos']):,} atoms"
+                                        + (", species re-assigned at random" if self.matrix_random.get()
+                                           else f", {mat['ntypes']} types")
+                                        + (f", scaled ×{n}" if n > 1 else "")
+                                        + f"); TPMS cells {pk[0]}×{pk[1]}×{pk[2]}")
             self.est["box"].config(text=" × ".join(f"{x*n/10:.1f}" for x in mat["box"]) + " nm"
                                    + (f"  (exact atomistic equivalent: the file's own "
                                       f"{' × '.join(f'{x/10:.1f}' for x in mat['box'])} nm)"
@@ -1058,11 +1069,19 @@ class App:
             t = float(self.t.get())
         mat = self._matrix()
         if mat is not None:
-            keep, phase, level = core.carve_matrix(mat, self.surface.get(), periods,
-                                                   self.phase.get(), t, dens)
+            keep, phase, level, pk = core.carve_matrix(mat, self.surface.get(), periods,
+                                                       self.phase.get(), t, dens)
             g = core.Geometry(mat["pos"][keep] * n, keep, float(mat["box"].max() * n), phase,
                               level, float(keep.mean()), None, 0, len(keep))
-            g.types = mat["types"][keep]
+            if self.matrix_random.get():
+                try:
+                    _, comp = self._composition()
+                except ValueError:
+                    comp = [1.0]
+                g.types = core.assign_species(len(keep), comp, np.random.default_rng(0))[keep]
+            else:
+                g.types = mat["types"][keep]
+            g.periods = pk
             return g
         cells = self._cells(n, a0)
         if not cells:
@@ -1205,6 +1224,9 @@ class App:
             matrix = self.matrix_path.get().strip()
             if not matrix or not os.path.isfile(matrix):
                 raise ValueError("Step ③: choose the LAMMPS data file to carve from")
+        if matrix and self.matrix_random.get():
+            pass                                   # species from step ②, file types ignored
+        elif matrix:
             m_els = self.matrix_types.get().split() or list(els)
             if sorted(m_els) != sorted(els):
                 raise ValueError(f"Step ③: the atom types of the file ({' '.join(m_els)}) must "
@@ -1224,7 +1246,8 @@ class App:
             params=self.par_path.get().strip() if pair == "meam" else "",
             lib_elements=lib_order if pair == "meam" else None,
             elements=m_els or els, composition=None if m_els else comp,
-            matrix=matrix, lattice=self.lattice.get(),
+            matrix=matrix, matrix_species="random" if matrix and self.matrix_random.get() else "file",
+            lattice=self.lattice.get(),
             n=num(self.n, "CG level n", int, 1),
             a0=num(self.a0, "a0", float, 0.5),
             auto_a0=self.auto_a0.get(), verify=self.verify.get(),
@@ -1276,6 +1299,7 @@ class App:
         self.matrix_mode.set("file" if cfg.matrix else "lattice")
         self.matrix_path.set(cfg.matrix or "")
         self.matrix_types.set(" ".join(cfg.elements) if cfg.matrix else "")
+        self.matrix_random.set(cfg.matrix_species == "random")
         self.box_mode.set("nm" if cfg.box_nm else "cells")
         if cfg.box_nm:
             self.box_nm.set(f"{cfg.box_nm:g}")

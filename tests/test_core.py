@@ -334,7 +334,7 @@ class TestMatrix(unittest.TestCase):
     def test_reader_refuses_unsupported(self):
         txt = read(self.path)
         bad = os.path.join(self.tmp, "bad.data")
-        write(bad, txt.replace("Atoms # atomic", "Atoms # charge"))
+        write(bad, txt.replace("Atoms # atomic", "Atoms # sphere"))
         with self.assertRaises(ValueError):
             core.read_lammps_data(bad)
         write(bad, txt.replace("3 atom types\n", "3 atom types\n0.5 0.0 0.0 xy xz yz\n"))
@@ -344,9 +344,37 @@ class TestMatrix(unittest.TestCase):
     def test_carve_density(self):
         m = core.read_lammps_data(self.path)
         for phase in ("network", "sheet"):
-            keep, ph, lev = core.carve_matrix(m, "gyroid", 1, phase, 0.0, 0.4)
+            keep, ph, lev, pk = core.carve_matrix(m, "gyroid", 1, phase, 0.0, 0.4)
             self.assertAlmostEqual(keep.mean(), 0.4, delta=0.01)
             self.assertEqual(ph, phase)
+
+    def test_charge_style_random_species_noncubic(self):
+        """OVITO/Atomsk-style template: atom_style charge, pure element, 3:3:1 box."""
+        pos = core.lattice("bcc", 3.3, 6)
+        pos = np.vstack([pos + [dx, dy, 0] for dx in (0, 19.8, 39.6) for dy in (0, 19.8, 39.6)])
+        lines = ["# LAMMPS data file written by OVITO", "", f"{len(pos)} atoms", "3 atom types", "",
+                 "-29.7 29.7 xlo xhi", "-29.7 29.7 ylo yhi", "-9.9 9.9 zlo zhi", "", "Masses", "",
+                 "1 47.867  # Ti", "2 92.906  # Nb", "3 95.95  # Mo", "", "Atoms  # charge", ""]
+        lines += [f"{i+1} 1 0.0 {x-29.7:.6f} {y-29.7:.6f} {z-9.9:.6f}" for i, (x, y, z) in enumerate(pos)]
+        path = os.path.join(self.tmp, "tpl.data")
+        write(path, "\n".join(lines) + "\n")
+        m = core.read_lammps_data(path)
+        self.assertEqual(m["style"], "charge")
+        np.testing.assert_allclose(m["box"], [59.4, 59.4, 19.8])
+        keep, ph, lev, pk = core.carve_matrix(m, "gyroid", 1, "network", 0.0, 0.5)
+        self.assertEqual(pk.tolist(), [3, 3, 1])                     # cubic 19.8 A cells
+        pot = os.path.join(self.tmp, "ABC.eam.alloy")
+        synthetic_setfl(pot, names=("A", "B", "C"))
+        cfg = core.Config(pair="eam", potential=pot, elements=["A", "B", "C"], n=1, a0=3.3,
+                          matrix=path, matrix_species="random", composition=[0.5, 0.3, 0.2],
+                          density=1.0, outdir=os.path.join(self.tmp, "o"), seed=5)
+        s = core.run_pipeline(cfg, core.Session(log=lambda *_: None))
+        self.assertEqual(s["n_beads"], len(pos))
+        self.assertEqual([s["counts"][e] for e in "ABC"], [1944, 1166, 778])   # exact counts
+        cfg.density, cfg.outdir = 0.4, os.path.join(self.tmp, "o2")
+        s2 = core.run_pipeline(cfg, core.Session(log=lambda *_: None))
+        self.assertEqual(s2["tpms_periods"], [3, 3, 1])
+        self.assertAlmostEqual(s2["fill"], 0.4, delta=0.01)
 
     def test_fit_modulus(self):
         eps = np.linspace(0, 0.02, 41)
