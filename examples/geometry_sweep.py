@@ -18,9 +18,11 @@ the relative density each architecture needs to reach a target modulus.
   python3 examples/geometry_sweep.py summarize --outroot sweep --target 20
 
 Protocol defaults: 300 K, 3 % compression at 1e-3/ps with lateral 0 bar, two seeds, fit
-between 0.25 % and 1.5 %. In ~26k-atom gyroids at 300 K, compressing to only 1 % left the
-lattice stress buried in thermal and barostat noise (R^2 < 0.7), hence the larger strain and
-the seeds. Check every stress-strain curve and the R^2 printed by `summarize`.
+between 0.75 % and 2.5 %. Tested on ~26k-atom Ti-Zr-Nb gyroids: switching from isotropic NPT
+to lateral control makes the box ring for the first ~0.75 % of strain (the same in every seed,
+so averaging does not remove it); after that the curves are linear to 3 %, the fit gives
+R^2 = 0.91-0.96 and seeds agree within ~3-5 %. A 1 % compression was noise-dominated
+(R^2 < 0.7). Check every stress-strain curve and the R^2 printed by `summarize`.
 """
 import argparse, csv, json, os, sys
 
@@ -147,7 +149,7 @@ def main():
     g.add_argument("--outroot", default="sweep")
     s = sub.add_parser("summarize", help="fit and compare the finished runs")
     s.add_argument("--outroot", default="sweep")
-    s.add_argument("--fit-window", nargs=2, type=float, default=(0.0025, 0.015))
+    s.add_argument("--fit-window", nargs=2, type=float, default=(0.0075, 0.025))
     s.add_argument("--target", type=float, help="target modulus, GPa (e.g. 20 for bone)")
     a = ap.parse_args()
     generate(a) if a.cmd == "generate" else summarize(a)

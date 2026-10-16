@@ -113,7 +113,7 @@ bulk polycrystal, cut them **out of that same polycrystal**:
 python3 cg_hea_tpms.py --pair adp --potential W_Mo_Nb_Zr_Ti_Ta.adp.alloy --elements Ti Zr Nb \
     --lattice bcc --matrix my_polycrystal.data -n 1 --surface gyroid --density 0.4 \
     --crush --crush-strain 0.03 --strain-rate 1e-3 --outdir gyroid_rho040
-python3 cg_hea_tpms.py --analyze */*_stress_strain.txt --fit-window 0.002 0.01
+python3 cg_hea_tpms.py --analyze */*_stress_strain.txt --fit-window 0.0075 0.025
 ```
 
 For a whole study, `examples/geometry_sweep.py` builds every surface × density (× seed) from
@@ -130,8 +130,14 @@ python3 examples/geometry_sweep.py summarize --outroot sweep --target 20
 ```
 
 The sweep's defaults are compression to 3 % at 10⁻³ ps⁻¹, two seeds per case, and a fit
-between 0.25 % and 1.5 %. In ~26,000-atom gyroids at 300 K, a 1 % compression left the lattice
-stress buried in thermal and barostat noise (R² < 0.7), so check every stress-strain curve.
+between 0.75 % and 2.5 %. They were tested on ~26,000-atom Ti-Zr-Nb gyroids at 300 K:
+- The box rings for the first ~0.75 % of strain after the barostat switches to lateral control.
+  The ringing is identical in every seed, so averaging doesn't remove it.
+- After that the curves are linear to 3 %, the fit gives R² = 0.91–0.96, and seeds agree
+  within ~3–5 %.
+- A 1 % compression was noise-dominated (R² < 0.7).
+
+Check every stress-strain curve anyway.
 
 `--matrix` reads an orthogonal `atom_style atomic` data file (image flags and Velocities are
 fine), keeps the atoms inside the TPMS solid, and scales the box by n. The composition is taken

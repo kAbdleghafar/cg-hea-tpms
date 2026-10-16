@@ -34,8 +34,8 @@ Examples
       --lattice bcc --matrix polycrystal.data -n 1 --surface gyroid --density 0.4 --crush \\
       --crush-strain 0.03 --outdir gyroid_rho040
 
-  # apparent Young's modulus of finished runs (linear fit between 0.2 % and 1 % strain)
-  python3 cg_hea_tpms.py --analyze run*/*_stress_strain.txt --fit-window 0.002 0.01
+  # apparent Young's modulus of finished runs (fit after the start-up ringing, 0.75-2.5 %)
+  python3 cg_hea_tpms.py --analyze run*/*_stress_strain.txt --fit-window 0.0075 0.025
 
   # re-run a configuration saved by the GUI
   python3 cg_hea_tpms.py --config cg_hea_output/gyroid_fcc_FeNiCoMn_cgn5_config.json
@@ -101,8 +101,10 @@ def build_parser():
                          "--elements; it is scaled by n (use -n 1 to stay atomistic)")
     ap.add_argument("--analyze", nargs="+", metavar="STRESS_STRAIN",
                     help="fit the apparent Young's modulus of *_stress_strain.txt files and exit")
-    ap.add_argument("--fit-window", nargs=2, type=float, default=(0.002, 0.01),
-                    metavar=("LO", "HI"), help="strain window for --analyze (default 0.002 0.01)")
+    ap.add_argument("--fit-window", nargs=2, type=float, default=(0.0075, 0.025),
+                    metavar=("LO", "HI"),
+                    help="strain window for --analyze (default 0.0075 0.025: after the start-up "
+                         "ringing of the box; compress to >= 3 %%)")
     ap.add_argument("--temp", type=float, help="PHYSICAL temperature, K (default 300)")
     ap.add_argument("--dt-aa", type=float, help="atomistic timestep ps (CG uses n*dt)")
     ap.add_argument("--dt-cg", type=float,
