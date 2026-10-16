@@ -376,6 +376,48 @@ class TestMatrix(unittest.TestCase):
         self.assertIn(f"0.0 {2*self.L:.8f} xlo xhi", out)
 
 
+class TestGeometrySweep(unittest.TestCase):
+    """examples/geometry_sweep.py: generate from a matrix, then summarise fake results."""
+
+    def test_generate_and_summarize(self):
+        import subprocess
+        tmp = tempfile.mkdtemp()
+        try:
+            pot = os.path.join(tmp, "AB.eam.alloy")
+            synthetic_setfl(pot)
+            t = core.assign_species(2 * 8**3, [0.5, 0.5], np.random.default_rng(0))
+            mat = os.path.join(tmp, "m.data")
+            core.write_data(mat, core.lattice("bcc", 3.3, 8), t, 8 * 3.3, [50.0, 70.0], "m")
+            script = os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "examples",
+                                  "geometry_sweep.py")
+            root = os.path.join(tmp, "sw")
+            out = subprocess.run([sys.executable, script, "generate", "--pair", "eam",
+                                  "--potential", pot, "--elements", "A", "B", "--matrix", mat,
+                                  "--surfaces", "gyroid", "--sheet", "--densities", "0.3", "0.5",
+                                  "--seeds", "1", "--outroot", root],
+                                 capture_output=True, text=True)
+            self.assertEqual(out.returncode, 0, out.stderr)
+            runs = sorted(d for d in os.listdir(root) if os.path.isdir(os.path.join(root, d)))
+            self.assertEqual(runs, ["bulk_s1", "gyroid_network_rho030_s1",
+                                    "gyroid_network_rho050_s1"])
+            self.assertEqual(read(os.path.join(root, "run_all.sh")).count("$LMP -in"), 3)
+            for d in runs:
+                s = json.loads(read(os.path.join(root, d, [f for f in os.listdir(
+                    os.path.join(root, d)) if f.endswith("_summary.json")][0])))
+                E = 50.0 if d.startswith("bulk") else 50.0 * 0.6 * s["fill"]**2   # C 0.6, m 2
+                eps = np.linspace(0, 0.03, 61)
+                write(os.path.join(root, d, s["prefix"] + "_stress_strain.txt"),
+                      "# t\n# TimeStep v_strain v_stress\n" +
+                      "".join(f"{i} {e} {E * e}\n" for i, e in enumerate(eps)))
+            out = subprocess.run([sys.executable, script, "summarize", "--outroot", root,
+                                  "--target", "5"], capture_output=True, text=True)
+            self.assertEqual(out.returncode, 0, out.stderr)
+            self.assertIn("C = 0.600  m = 2.00", out.stdout)
+            self.assertIn("rho = 0.408 for E* = 5 GPa", out.stdout)   # (5/30)^(1/2)
+        finally:
+            shutil.rmtree(tmp)
+
+
 class TestConfig(unittest.TestCase):
     def test_json_and_cli(self):
         cfg = core.Config(pair="eam", potential="x.eam.alloy", elements=["Fe", "Ni"],

@@ -23,6 +23,7 @@ all-atom specimen; size effects are those of the `L/n` cell.
 | `cg_hea_gui.py` | Graphical interface (Tkinter, no extra install) |
 | `cg_hea_tpms.py` | Command line; opens the GUI when run without arguments |
 | `cg_hea_core.py` | Engine shared by both: potential rescaling, FCC/BCC lattices, checks, TPMS, LAMMPS inputs |
+| `examples/geometry_sweep.py` | Architecture-vs-bulk study: generate a sweep from your structure, then fit E, E/E_bulk and Gibson-Ashby scaling |
 | `tests/test_core.py` | Unit tests plus FCC/BCC LAMMPS integration tests |
 | `docs/` | Screenshots and an example stress-strain plot |
 | `LICENSE`, `CITATION.cff` | MIT license; citation metadata ("Cite this repository" on GitHub) |
@@ -114,6 +115,23 @@ python3 cg_hea_tpms.py --pair adp --potential W_Mo_Nb_Zr_Ti_Ta.adp.alloy --eleme
     --crush --crush-strain 0.03 --strain-rate 1e-3 --outdir gyroid_rho040
 python3 cg_hea_tpms.py --analyze */*_stress_strain.txt --fit-window 0.002 0.01
 ```
+
+For a whole study, `examples/geometry_sweep.py` builds every surface × density (× seed) from
+the same structure, plus the bulk itself, and writes `run_all.sh`. After the runs it fits each
+modulus, normalises it by the bulk, and fits `E*/E_bulk = C·ρ^m` per architecture.
+`--target 20` reports the density needed for a 20 GPa (bone-like) lattice:
+
+```bash
+python3 examples/geometry_sweep.py generate --pair adp --potential W_Mo_Nb_Zr_Ti_Ta.adp.alloy \
+    --elements Ti Zr Nb --matrix my_polycrystal.data --outroot sweep \
+    --surfaces gyroid diamond primitive iwp --sheet gyroid --densities 0.25 0.35 0.5
+cd sweep && LMP="mpirun -np 32 lmp" bash run_all.sh && cd ..
+python3 examples/geometry_sweep.py summarize --outroot sweep --target 20
+```
+
+The sweep's defaults are compression to 3 % at 10⁻³ ps⁻¹, two seeds per case, and a fit
+between 0.25 % and 1.5 %. In ~26,000-atom gyroids at 300 K, a 1 % compression left the lattice
+stress buried in thermal and barostat noise (R² < 0.7), so check every stress-strain curve.
 
 `--matrix` reads an orthogonal `atom_style atomic` data file (image flags and Velocities are
 fine), keeps the atoms inside the TPMS solid, and scales the box by n. The composition is taken
