@@ -299,6 +299,83 @@ class TestGeometry(unittest.TestCase):
             self.assertTrue(np.all(c == len(core.NN_OFFSETS[kind])))
 
 
+class TestMatrix(unittest.TestCase):
+    """Carving TPMS geometries out of an existing structure (e.g. the user's polycrystal)."""
+
+    def setUp(self):
+        self.tmp = tempfile.mkdtemp()
+        rng = np.random.default_rng(3)
+        pos = core.lattice("bcc", 3.3, 6) + 0.05 * rng.normal(size=(432, 3))
+        self.types = core.assign_species(432, [0.5, 0.25, 0.25], rng)
+        L, lo = 6 * 3.3, -2.0
+        lines = ["LAMMPS data file via write_data", "", "432 atoms", "3 atom types", ""]
+        lines += [f"{lo} {lo + L} {ax}lo {ax}hi" for ax in "xyz"]
+        lines += ["", "Masses", "", "1 47.867", "2 91.224", "3 92.906", "", "Atoms # atomic", ""]
+        order = rng.permutation(432)                         # unsorted ids, image flags
+        for i in order:
+            x, y, z = pos[i] + lo + np.array([L, 0, -L]) * (i % 2)
+            lines.append(f"{i+1} {self.types[i]} {x:.6f} {y:.6f} {z:.6f} {i % 2} 0 {-(i % 2)}")
+        lines += ["", "Velocities", ""] + [f"{i+1} 0.1 0.0 0.0" for i in range(432)]
+        self.path = os.path.join(self.tmp, "poly.data")
+        write(self.path, "\n".join(lines) + "\n")
+        self.L = L
+
+    def tearDown(self):
+        shutil.rmtree(self.tmp)
+
+    def test_reader(self):
+        m = core.read_lammps_data(self.path)
+        self.assertEqual(len(m["pos"]), 432)
+        np.testing.assert_array_equal(m["types"], self.types)       # sorted back by id
+        np.testing.assert_allclose(m["box"], self.L)
+        self.assertTrue(np.all((m["pos"] >= 0) & (m["pos"] < self.L)))
+        self.assertEqual(m["masses"][2], 91.224)
+
+    def test_reader_refuses_unsupported(self):
+        txt = read(self.path)
+        bad = os.path.join(self.tmp, "bad.data")
+        write(bad, txt.replace("Atoms # atomic", "Atoms # charge"))
+        with self.assertRaises(ValueError):
+            core.read_lammps_data(bad)
+        write(bad, txt.replace("3 atom types\n", "3 atom types\n0.5 0.0 0.0 xy xz yz\n"))
+        with self.assertRaises(ValueError):
+            core.read_lammps_data(bad)
+
+    def test_carve_density(self):
+        m = core.read_lammps_data(self.path)
+        for phase in ("network", "sheet"):
+            keep, ph, lev = core.carve_matrix(m, "gyroid", 1, phase, 0.0, 0.4)
+            self.assertAlmostEqual(keep.mean(), 0.4, delta=0.01)
+            self.assertEqual(ph, phase)
+
+    def test_fit_modulus(self):
+        eps = np.linspace(0, 0.02, 41)
+        sig = 25.0 * eps + 0.01 + 0.001 * np.sin(300 * eps)
+        f = os.path.join(self.tmp, "x_stress_strain.txt")
+        write(f, "# fix ave/time\n# TimeStep v_strain v_stress\n" +
+              "".join(f"{i} {e} {s}\n" for i, (e, s) in enumerate(zip(eps, sig))))
+        E, c, r2, k = core.fit_modulus(f, 0.002, 0.01)
+        self.assertAlmostEqual(E, 25.0, delta=0.3)
+        self.assertGreater(r2, 0.99)
+        self.assertEqual(k, 17)
+
+    @unittest.skipUnless(LMP, "LAMMPS executable not found")
+    def test_pipeline_with_matrix(self):
+        pot = os.path.join(self.tmp, "ABC.eam.alloy")
+        synthetic_setfl(pot, names=("A", "B", "C"))
+        cfg = core.Config(pair="eam", potential=pot, elements=["A", "B", "C"], lattice="bcc",
+                          n=2, a0=3.3, matrix=self.path, surface="gyroid", density=0.5,
+                          lmp=LMP, outdir=os.path.join(self.tmp, "out"), crush=True,
+                          crush_strain=0.03)
+        s = core.run_pipeline(cfg, core.Session(log=lambda *_: None))
+        self.assertAlmostEqual(s["fill"], 0.5, delta=0.01)
+        np.testing.assert_allclose(s["box_vector"], 2 * self.L)
+        self.assertEqual(sum(s["counts"].values()), s["n_beads"])
+        self.assertAlmostEqual(s["composition"][0], 0.5, delta=1e-9)  # taken from the file
+        out = read(os.path.join(s["outdir"], s["prefix"] + ".data"))
+        self.assertIn(f"0.0 {2*self.L:.8f} xlo xhi", out)
+
+
 class TestConfig(unittest.TestCase):
     def test_json_and_cli(self):
         cfg = core.Config(pair="eam", potential="x.eam.alloy", elements=["Fe", "Ni"],

@@ -29,6 +29,14 @@ Examples
   python3 cg_hea_tpms.py --pair eamfs --potential TWIP.eam.fs --elements meta_TWIP -n 5 \\
       --a0 3.6 --auto-a0 --verify --surface gyroid --cells 20 --crush
 
+  # carve TPMS geometries out of YOUR polycrystal (LAMMPS data file, types in --elements order)
+  python3 cg_hea_tpms.py --pair adp --potential W_Mo_Nb_Zr_Ti_Ta.adp.alloy --elements Ti Zr Nb \\
+      --lattice bcc --matrix polycrystal.data -n 1 --surface gyroid --density 0.4 --crush \\
+      --crush-strain 0.03 --outdir gyroid_rho040
+
+  # apparent Young's modulus of finished runs (linear fit between 0.2 % and 1 % strain)
+  python3 cg_hea_tpms.py --analyze run*/*_stress_strain.txt --fit-window 0.002 0.01
+
   # re-run a configuration saved by the GUI
   python3 cg_hea_tpms.py --config cg_hea_output/gyroid_fcc_FeNiCoMn_cgn5_config.json
 """
@@ -87,6 +95,14 @@ def build_parser():
                     help="target relative density (solid fraction, 0-1); sets t automatically")
     ap.add_argument("--min-coord", type=int,
                     help="remove beads with fewer first neighbours than this (0 = off)")
+    ap.add_argument("--matrix",
+                    help="carve the TPMS out of this LAMMPS data file (atom_style atomic, "
+                         "orthogonal box), e.g. your polycrystal; its atom types must follow "
+                         "--elements; it is scaled by n (use -n 1 to stay atomistic)")
+    ap.add_argument("--analyze", nargs="+", metavar="STRESS_STRAIN",
+                    help="fit the apparent Young's modulus of *_stress_strain.txt files and exit")
+    ap.add_argument("--fit-window", nargs=2, type=float, default=(0.002, 0.01),
+                    metavar=("LO", "HI"), help="strain window for --analyze (default 0.002 0.01)")
     ap.add_argument("--temp", type=float, help="PHYSICAL temperature, K (default 300)")
     ap.add_argument("--dt-aa", type=float, help="atomistic timestep ps (CG uses n*dt)")
     ap.add_argument("--dt-cg", type=float,
@@ -108,10 +124,26 @@ def build_parser():
 def config_from_args(a):
     cfg = core.Config.from_json(a.config) if a.config else core.Config()
     for k, v in vars(a).items():
-        if k in ("gui", "config", "save_config") or v is None:
+        if k in ("gui", "config", "save_config", "analyze", "fit_window") or v is None:
             continue
         setattr(cfg, k, v)
     return cfg
+
+
+def analyze(paths, lo, hi):
+    """Print the apparent modulus of each stress-strain file (with its relative density)."""
+    import json, os
+    print(f"{'run':55s} {'rel. density':>12s} {'E (GPa)':>9s} {'R^2':>6s} {'pts':>4s}")
+    for p in paths:
+        try:
+            E, _, r2, k = core.fit_modulus(p, lo, hi)
+        except (OSError, ValueError) as e:
+            print(f"{p:55s}  ERROR {e}")
+            continue
+        summ = p.replace("_stress_strain.txt", "_summary.json")
+        rho = json.load(open(summ)).get("fill") if os.path.isfile(summ) else None
+        print(f"{p[-55:]:55s} {rho if rho is None else round(rho, 4)!s:>12s} {E:9.2f} {r2:6.3f} {k:4d}")
+    return 0
 
 
 def main(argv=None):
@@ -121,6 +153,8 @@ def main(argv=None):
     if a.gui or not argv:
         import cg_hea_gui
         return cg_hea_gui.main()
+    if a.analyze:
+        return analyze(a.analyze, *a.fit_window)
     cfg = config_from_args(a)
     if not cfg.elements:
         ap.error("--elements is required")

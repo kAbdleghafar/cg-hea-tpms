@@ -682,6 +682,95 @@ def build_geometry(kind, a_cg, cells, surface, periods=1, phase="auto", t=0.0,
     return Geometry(pos[keep], keep, L, phase, level, float(keep.mean()), surf, removed, len(idx))
 
 
+def read_lammps_data(path):
+    """Minimal reader for orthogonal, atom_style atomic LAMMPS data files (e.g. a polycrystal
+    built with Atomsk or LAMMPS). Positions are wrapped into the box and shifted to start at 0."""
+    name = os.path.basename(path)
+    try:
+        lines = _read(path).splitlines()
+    except OSError as e:
+        raise ValueError(f"cannot read matrix file {path} ({e})")
+    box, natoms, ntypes, i = {}, None, None, 1
+    sections = ("Atoms", "Masses", "Velocities", "Pair Coeffs", "PairIJ Coeffs", "Bonds")
+    while i < len(lines) and not lines[i].strip().startswith(sections):
+        w = lines[i].split("#")[0].split()
+        if len(w) >= 2 and w[-1] == "atoms":
+            natoms = int(w[0])
+        elif len(w) >= 3 and w[-2:] == ["atom", "types"]:
+            ntypes = int(w[0])
+        elif len(w) == 4 and w[2] in ("xlo", "ylo", "zlo"):
+            box[w[2][0]] = (float(w[0]), float(w[1]))
+        elif len(w) >= 6 and w[3:6] == ["xy", "xz", "yz"] and any(float(x) for x in w[:3]):
+            raise ValueError(f"{name}: triclinic boxes are not supported (non-zero tilt)")
+        i += 1
+    if natoms is None or ntypes is None or len(box) != 3:
+        raise ValueError(f"{name}: not a LAMMPS data file (atoms / atom types / box missing)")
+    masses, pos, types = {}, None, None
+    while i < len(lines):
+        head = lines[i].strip()
+        i += 1
+        if not head:
+            continue
+        key = head.split("#")[0].strip()
+        rows = []
+        while i < len(lines) and not lines[i].strip():
+            i += 1
+        while i < len(lines) and lines[i].strip() and lines[i].split()[0][:1] in "-+.0123456789":
+            rows.append(lines[i].split("#")[0].split())
+            i += 1
+        if key == "Masses":
+            masses = {int(r[0]): float(r[1]) for r in rows}
+        elif key == "Atoms":
+            style = head.split("#")[1].strip() if "#" in head else "atomic"
+            if style != "atomic":
+                raise ValueError(f"{name}: atom_style '{style}' - only 'atomic' data files are "
+                                 f"supported (write_data from an atom_style atomic run)")
+            a = np.array([r[:5] for r in rows], float)
+            if len(a) != natoms:
+                raise ValueError(f"{name}: {len(a)} atom lines, header says {natoms}")
+            a = a[np.argsort(a[:, 0])]
+            types = a[:, 1].astype(int)
+            pos = a[:, 2:5].copy()
+    if pos is None:
+        raise ValueError(f"{name}: no Atoms section")
+    lo = np.array([box[k][0] for k in "xyz"])
+    L = np.array([box[k][1] - box[k][0] for k in "xyz"])
+    pos = np.mod(pos - lo, L)
+    if types.min() < 1 or types.max() > ntypes:
+        raise ValueError(f"{name}: atom types outside 1..{ntypes}")
+    return dict(pos=pos, types=types, box=L, ntypes=ntypes, masses=masses, name=name)
+
+
+def carve_matrix(mat, surface, periods=1, phase="auto", t=0.0, density=None):
+    """Keep the atoms of an existing structure that lie in the TPMS solid (box-relative)."""
+    pos, L = mat["pos"], mat["box"]
+    f = SURFACES[surface](*(TWO_PI * periods * pos[:, k] / L[k] for k in range(3)))
+    phase, level = resolve_phase(phase, t)
+    if density:
+        if phase == "auto":
+            phase = "network"
+        level = level_for_density(f, phase, density)
+    if phase == "sheet" and level <= 0:
+        raise ValueError("sheet TPMS needs a positive thickness level t (or a target density)")
+    keep = solid_mask(f, phase, level)
+    return keep, phase, level
+
+
+def fit_modulus(path, lo=0.002, hi=0.01):
+    """Apparent Young's modulus (GPa) from a *_stress_strain.txt file: least-squares slope
+    of stress vs strain between strains lo and hi. Returns (E, intercept, R^2, points)."""
+    d = np.loadtxt(path, comments="#", ndmin=2)
+    eps, sig = d[:, 1], d[:, 2]
+    m = (eps >= lo) & (eps <= hi)
+    if m.sum() < 3:
+        raise ValueError(f"{os.path.basename(path)}: fewer than 3 points between strain "
+                         f"{lo:g} and {hi:g}")
+    A = np.vstack([eps[m], np.ones(m.sum())]).T
+    (E, c), *_ = np.linalg.lstsq(A, sig[m], rcond=None)
+    r2 = 1 - np.sum((sig[m] - A @ [E, c])**2) / max(np.sum((sig[m] - sig[m].mean())**2), 1e-30)
+    return float(E), float(c), float(r2), int(m.sum())
+
+
 # ───────────────────────── configuration ─────────────────────────
 @dataclass
 class Config:
@@ -707,6 +796,8 @@ class Config:
     t: float = 0.0
     density: float = None             # target solid fraction (overrides t)
     min_coord: int = 0
+    matrix: str = None                # carve the TPMS from this LAMMPS data file (e.g. your
+                                      # polycrystal; types in --elements order), scaled by n
     temp: float = 300.0
     dt_aa: float = 0.001
     dt_cg: float = None               # CG timestep override, ps (default n*dt_aa = exact map)
@@ -809,6 +900,8 @@ class Config:
             a.append(f"--density {self.density:g}")
         if self.min_coord:
             a.append(f"--min-coord {self.min_coord}")
+        if self.matrix:
+            a.append(f"--matrix {q(self.matrix)}")
         a += [f"--temp {self.temp:g}", f"--dt-aa {self.dt_aa:g}", f"--equil {self.equil}"]
         a += [f"--{k.replace('_', '-')} {getattr(self, k):g}" for k in ("dt_cg", "tdamp", "pdamp")
               if getattr(self, k)]
@@ -899,10 +992,11 @@ class Session:
 
 
 def write_data(path, pos, types, L, masses, title, fmt=".8f"):
+    Ls = np.broadcast_to(np.asarray(L, float), (3,))
     with open(path, "w") as f:
         f.write(f"{title}\n\n{len(pos)} atoms\n{len(masses)} atom types\n\n")
-        for ax in "xyz":
-            f.write(f"0.0 {L:{fmt}} {ax}lo {ax}hi\n")
+        for ax, Lk in zip("xyz", Ls):
+            f.write(f"0.0 {Lk:{fmt}} {ax}lo {ax}hi\n")
         f.write("\nMasses\n\n" + "".join(f"{i} {m:.10g}\n" for i, m in enumerate(masses, 1)))
         f.write("\nAtoms # atomic\n\n")
         f.writelines(f"{i} {t} {x:{fmt}} {y:{fmt}} {z:{fmt}}\n"
@@ -1015,6 +1109,14 @@ def run_pipeline(cfg: Config, session: Session = None):
     log = S.log
     cfg.validate()
     n, els, kind = cfg.n, list(cfg.elements), cfg.lattice
+    mat = None
+    if cfg.matrix:
+        mat = read_lammps_data(cfg.matrix)
+        if mat["ntypes"] != len(els):
+            raise ValueError(f"{mat['name']} has {mat['ntypes']} atom types but {len(els)} "
+                             f"elements were given (list them in the file's type order)")
+        if cfg.composition is None:
+            cfg.composition = [float(np.mean(mat["types"] == k)) for k in range(1, len(els) + 1)]
     comp = cfg.fractions()
     info = load_potential(cfg.pair, cfg.potential, cfg.library, cfg.params)
     missing = [e for e in els if e not in info.masses]
@@ -1193,34 +1295,51 @@ def run_pipeline(cfg: Config, session: Session = None):
                 "no CG model was written. Please report the potential file: an unsupported "
                 "feature of it is probably not rescaled.")
 
-    # 4. CG lattice + TPMS mask + random species
+    # 4. CG lattice + TPMS mask + random species (or carve an existing structure)
     S.check()
-    cells = max(1, math.ceil(cfg.box_nm * 10 / a_cg - 1e-9)) if cfg.box_nm else cfg.cells
-    if cfg.box_nm:
-        log(f"     box {cfg.box_nm:g} nm requested -> {cells} CG cells per side (rounded up)")
-    geo = build_geometry(kind, a_cg, cells, cfg.surface, cfg.periods, cfg.phase, cfg.t,
-                         cfg.density, cfg.min_coord)
-    if len(geo.pos) == 0:
-        raise ValueError("the TPMS mask removed every bead - raise t or the target density")
-    types = assign_species(len(geo.pos), comp, rng)
-    L = geo.L
-    pre = f"{cfg.surface}_{kind}_{tag}_cgn{n}"
-    write_data(os.path.join(outdir, pre + ".data"), geo.pos, types, L, m_cg,
+    if mat is not None:
+        keep, phase, level = carve_matrix(mat, cfg.surface, cfg.periods, cfg.phase, cfg.t,
+                                          cfg.density)
+        if not keep.any():
+            raise ValueError("the TPMS mask removed every atom - raise t or the target density")
+        pos, types, Lv = mat["pos"][keep] * n, mat["types"][keep], mat["box"] * n
+        fill, surf, pruned, cells = float(keep.mean()), None, 0, None
+        if np.ptp(mat["box"]) > 0.01 * mat["box"].max():
+            log(f"     note: the matrix box is not cubic {np.round(mat['box'], 2)} Å - the TPMS "
+                f"is stretched with it")
+        src = f"carved from {mat['name']} ({len(keep):,} atoms" + (f", scaled x{n}" if n > 1 else "") + ")"
+    else:
+        cells = max(1, math.ceil(cfg.box_nm * 10 / a_cg - 1e-9)) if cfg.box_nm else cfg.cells
+        if cfg.box_nm:
+            log(f"     box {cfg.box_nm:g} nm requested -> {cells} CG cells per side (rounded up)")
+        geo = build_geometry(kind, a_cg, cells, cfg.surface, cfg.periods, cfg.phase, cfg.t,
+                             cfg.density, cfg.min_coord)
+        if len(geo.pos) == 0:
+            raise ValueError("the TPMS mask removed every bead - raise t or the target density")
+        pos, Lv = geo.pos, np.full(3, geo.L)
+        types = assign_species(len(pos), comp, rng)
+        phase, level, fill, surf, pruned = geo.phase, geo.level, geo.fill, geo.surface_fraction, geo.pruned
+        src = f"on a CG-{kind.upper()} lattice"
+    L = float(Lv.max())
+    pre = f"{cfg.surface}_{kind}_{tag}_cgn{n}" + ("_matrix" if mat is not None else "")
+    write_data(os.path.join(outdir, pre + ".data"), pos, types, Lv, m_cg,
                f"CG n={n} {kind.upper()} {cfg.surface} {tag} composition "
                f"{[round(c, 6) for c in comp]}")
     frac = ", ".join(f"{e} {np.mean(types == i+1):.3f}" for i, e in enumerate(els))
-    lev = f"|f| <= {geo.level:.4g}" if geo.phase == "sheet" else f"f <= {geo.level:.4g}"
-    log(f"[4] {cfg.surface} {geo.phase} ({lev}) on a CG-{kind.upper()} lattice: box {L:.1f} Å "
-        f"({L/10:.1f} nm), {len(geo.pos):,} beads (~{len(geo.pos)*n**3:,} atoms), "
-        f"fill {100*geo.fill:.1f}%  [{frac}]")
-    if geo.pruned:
-        log(f"     removed {geo.pruned} bead(s) with < {cfg.min_coord} first neighbours")
-    log(f"     surface beads {100*geo.surface_fraction:.0f}%"
-        + ("  ** thin walls: raise cells or lower periods/n **" if geo.surface_fraction > 0.6
-           else ""))
+    lev = f"|f| <= {level:.4g}" if phase == "sheet" else f"f <= {level:.4g}"
+    box_txt = (f"{L:.1f} Å ({L/10:.1f} nm)" if np.ptp(Lv) < 1e-6 else
+               " x ".join(f"{x/10:.1f}" for x in Lv) + " nm")
+    log(f"[4] {cfg.surface} {phase} ({lev}) {src}: box {box_txt}, {len(pos):,} beads "
+        f"(~{len(pos)*n**3:,} atoms), fill {100*fill:.1f}%  [{frac}]")
+    if pruned:
+        log(f"     removed {pruned} bead(s) with < {cfg.min_coord} first neighbours")
+    if surf is not None:
+        log(f"     surface beads {100*surf:.0f}%"
+            + ("  ** thin walls: raise cells or lower periods/n **" if surf > 0.6 else ""))
     log(f"     exact atomistic equivalent: same cell at {L/n/10:.1f} nm edge")
-    summary.update(prefix=pre, n_beads=len(geo.pos), cells=cells, box=L, fill=geo.fill,
-                   phase=geo.phase, level=geo.level, surface_fraction=geo.surface_fraction,
+    summary.update(prefix=pre, n_beads=len(pos), cells=cells, box=L, box_vector=Lv.tolist(),
+                   fill=fill, phase=phase, level=level, surface_fraction=surf,
+                   matrix=cfg.matrix,
                    type_to_element={str(i + 1): e for i, e in enumerate(els)},
                    counts={e: int(np.sum(types == i + 1)) for i, e in enumerate(els)},
                    interpretation=f"exact similarity map: this CG cell behaves like an atomistic "

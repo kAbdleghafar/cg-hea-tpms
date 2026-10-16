@@ -191,6 +191,7 @@ class App:
         self.surface = S(value="gyroid")
         self.cells, self.periods = S(value="20"), S(value="1")
         self.box_mode, self.box_nm = S(value="cells"), S(value="30")
+        self.matrix_mode, self.matrix_path, self.matrix_types = S(value="lattice"), S(), S()
         self.dt_cg, self.tdamp, self.pdamp = S(), S(), S()
         self.phase = S(value="network")
         self.thick_mode = S(value="density")
@@ -205,6 +206,7 @@ class App:
         self.lmp, self.mpi = S(value="lmp"), S(value="")
         self.outdir = S(value=os.path.abspath("cg_hea_output"))
         for v in (self.lattice, self.n, self.cells, self.box_mode, self.box_nm, self.dt_cg,
+                  self.matrix_mode, self.matrix_path,
                   self.periods, self.phase, self.thick_mode,
                   self.t, self.density, self.min_coord, self.temp, self.dt, self.a0, self.surface):
             v.trace_add("write", lambda *a: self._refresh())
@@ -702,6 +704,31 @@ class App:
         self.n_info = ttk.Label(cg, text="", style="Hint.TLabel")
         self.n_info.grid(row=0, column=2, sticky="w", padx=10)
 
+        mf = ttk.LabelFrame(p, text="Solid to carve the TPMS from", padding=8)
+        mf.pack(fill="x", padx=10, pady=4)
+        ttk.Radiobutton(mf, text="generated single crystal (FCC/BCC of step ②, random alloy)",
+                        value="lattice", variable=self.matrix_mode).grid(row=0, column=0,
+                                                                          columnspan=3, sticky="w")
+        ttk.Radiobutton(mf, text="existing structure: LAMMPS data file (e.g. your polycrystal)",
+                        value="file", variable=self.matrix_mode).grid(row=1, column=0,
+                                                                       columnspan=3, sticky="w")
+        ttk.Entry(mf, textvariable=self.matrix_path, width=50).grid(row=2, column=0, sticky="we",
+                                                                    padx=(22, 4), pady=2)
+        ttk.Button(mf, text="Browse…", command=self._browse_matrix).grid(row=2, column=1)
+        lab = ttk.Label(mf, text="Atom types 1, 2, … in the file are")
+        lab.grid(row=3, column=0, sticky="w", padx=(22, 4), pady=2)
+        e = ttk.Entry(mf, textvariable=self.matrix_types, width=24)
+        e.grid(row=3, column=1, sticky="w", pady=2)
+        tip = ("Element of each atom type in your data file, in type order, e.g. 'Ti Zr Nb'. "
+               "Must be the elements ticked in step ②. Empty = the order shown in step ②.")
+        Tooltip(lab, tip)
+        Tooltip(e, tip)
+        wrap_label(mf, "atom_style atomic, orthogonal box. The file is scaled by n (n = 1 keeps "
+                       "it atomistic) and the TPMS is cut from it, so grains, boundaries and "
+                       "composition are exactly those of your bulk reference.",
+                   "Hint.TLabel").grid(row=4, column=0, columnspan=2, sticky="we", padx=(22, 4))
+        mf.columnconfigure(0, weight=1)
+
         g = ttk.LabelFrame(p, text="TPMS geometry", padding=8)
         g.pack(fill="x", padx=10, pady=8)
         ttk.Label(g, text="Surface").grid(row=0, column=0, sticky="w", padx=4, pady=3)
@@ -845,6 +872,31 @@ class App:
             messagebox.showwarning("LAMMPS", "No LAMMPS executable (lmp, lmp_serial, lmp_mpi…) "
                                              "found on PATH. Use Browse… to select it.")
 
+    def _browse_matrix(self):
+        path = filedialog.askopenfilename(title="Structure to carve from (LAMMPS data file)",
+                                          filetypes=[("LAMMPS data", "*.data *.lmp *.dat"),
+                                                     ("All files", "*")])
+        if path:
+            self.matrix_path.set(path)
+            self.matrix_mode.set("file")
+            try:
+                m = self._matrix()
+                self._log(f"Matrix loaded: {m['name']}, {len(m['pos']):,} atoms, {m['ntypes']} "
+                          f"atom types, box {' x '.join(f'{x:.2f}' for x in m['box'])} Å")
+            except Exception as e:
+                messagebox.showerror("Matrix file", str(e))
+
+    def _matrix(self):
+        """Parsed matrix file (cached), or None when carving from the generated lattice."""
+        path = self.matrix_path.get().strip()
+        if self.matrix_mode.get() != "file" or not path:
+            return None
+        key = (path, os.path.getmtime(path))
+        if getattr(self, "_mat_key", None) != key:
+            self._mat = core.read_lammps_data(path)
+            self._mat_key = key
+        return self._mat
+
     def _browse_outdir(self):
         path = filedialog.askdirectory(title="Output folder", initialdir=self.outdir.get())
         if path:
@@ -907,7 +959,6 @@ class App:
         self._est_job = None
         info, kind = self.info, self.lattice.get()
         n, a0 = self._f(self.n, int), self._f(self.a0)
-        cells = self._cells(n, a0)
         T, dt = self._f(self.temp), self._f(self.dt)
         self.est["pot"].config(text=(f"{core.PAIR_STYLES[info.pair]}, cutoff {info.cutoff:.2f} Å"
                                      + (f" → {n*info.cutoff:.2f} Å (CG)" if n else ""))
@@ -923,6 +974,40 @@ class App:
         if n and n >= 1:
             self.n_info.config(text=f"1 bead = {n**3:,} atoms   •   bead mass = {n**3} × atomic mass"
                                     f"   •   T_CG = {n**3:,} × T")
+        if T and dt and n:
+            dtc = self._f(self.dt_cg) or n * dt
+            self.est["md"].config(text=f"T_CG = {n**3*T:,.0f} K  (physical {T:g} K), "
+                                       f"dt_CG = {dtc:g} ps"
+                                       + ("" if abs(dtc - n*dt) < 1e-12 else "  (override)"))
+        if self.matrix_mode.get() == "file":
+            try:
+                mat = self._matrix()
+            except Exception as e:
+                mat, err = None, str(e)
+            else:
+                err = "choose the data file (step ③)"
+            if mat is None or not n:
+                for k in ("lat", "beads"):
+                    self.est[k].config(text="—")
+                self.est["box"].config(text=f"matrix: {err}")
+                return
+            self.est["lat"].config(text=f"carved from {mat['name']} ({len(mat['pos']):,} atoms, "
+                                        f"{mat['ntypes']} types)" + (f", scaled ×{n}" if n > 1 else ""))
+            self.est["box"].config(text=" × ".join(f"{x*n/10:.1f}" for x in mat["box"]) + " nm"
+                                   + (f"  (exact atomistic equivalent: the file's own "
+                                      f"{' × '.join(f'{x/10:.1f}' for x in mat['box'])} nm)"
+                                      if n > 1 else ""))
+            try:
+                g = self._geometry(a0)
+                txt = (f"{len(g.pos):,} beads ≈ {len(g.pos)*n**3:,} atoms  •  fill "
+                       f"{100*g.fill:.1f} %")
+                self.geo_info.config(text=f"{self.surface.get()} {g.phase} carved from "
+                                          f"{mat['name']}: level t = {g.level:.4g}, {txt}")
+            except Exception as e:
+                txt = f"({e})"
+            self.est["beads"].config(text=txt)
+            return
+        cells = self._cells(n, a0)
         if not (n and cells and a0 and n >= 1 and cells >= 1 and a0 > 0):
             for k in ("lat", "box", "beads"):
                 self.est[k].config(text="—")
@@ -953,11 +1038,6 @@ class App:
                 txt = f"≈ {int(sites*dens/100):,} beads ≈ {int(sites*dens/100)*n**3:,} atoms"
             txt += "  (press Preview for exact numbers)"
         self.est["beads"].config(text=txt)
-        if T and dt:
-            dtc = self._f(self.dt_cg) or n * dt
-            self.est["md"].config(text=f"T_CG = {n**3*T:,.0f} K  (physical {T:g} K), "
-                                       f"dt_CG = {dtc:g} ps"
-                                       + ("" if abs(dtc - n*dt) < 1e-12 else "  (override)"))
 
     def _cells(self, n=None, a0=None):
         """CG cells per side, from the cell count or from the box edge in nm."""
@@ -971,14 +1051,22 @@ class App:
     def _geometry(self, a0=None):
         a0 = a0 or self._f(self.a0)
         n, periods = int(self.n.get()), int(self.periods.get())
-        cells = self._cells(n, a0)
-        if not cells:
-            raise ValueError("set the box size")
         dens, t = None, 0.0
         if self.thick_mode.get() == "density":
             dens = float(self.density.get()) / 100.0
         else:
             t = float(self.t.get())
+        mat = self._matrix()
+        if mat is not None:
+            keep, phase, level = core.carve_matrix(mat, self.surface.get(), periods,
+                                                   self.phase.get(), t, dens)
+            g = core.Geometry(mat["pos"][keep] * n, keep, float(mat["box"].max() * n), phase,
+                              level, float(keep.mean()), None, 0, len(keep))
+            g.types = mat["types"][keep]
+            return g
+        cells = self._cells(n, a0)
+        if not cells:
+            raise ValueError("set the box size")
         return core.build_geometry(self.lattice.get(), n * a0, cells, self.surface.get(),
                                    periods, self.phase.get(), t, dens,
                                    int(self.min_coord.get() or 0))
@@ -998,9 +1086,13 @@ class App:
         finally:
             self.root.config(cursor="")
         n = int(self.n.get())
-        msg = (f"{self.surface.get()} {g.phase} on a CG-{self.lattice.get().upper()} lattice: "
+        where = ("carved from " + self._matrix()["name"] if hasattr(g, "types") else
+                 f"on a CG-{self.lattice.get().upper()} lattice")
+        msg = (f"{self.surface.get()} {g.phase} {where}: "
                f"{len(g.pos):,} beads (≈ {len(g.pos)*n**3:,} atoms), fill {100*g.fill:.1f} %, "
-               f"surface beads {100*g.surface_fraction:.0f} %, level t = {g.level:.4g}"
+               + (f"surface beads {100*g.surface_fraction:.0f} %, "
+                  if g.surface_fraction is not None else "")
+               + f"level t = {g.level:.4g}"
                + (f", {g.pruned} dangling beads removed" if g.pruned else ""))
         self.geo_info.config(text=msg)
         self._log("Preview: " + msg)
@@ -1010,7 +1102,11 @@ class App:
             els, comp = self._composition()
         except ValueError:
             els, comp = ["bead"], [1.0]
-        types = core.assign_species(len(g.pos), comp, np.random.default_rng(0))
+        types = getattr(g, "types", None)
+        if types is None:
+            types = core.assign_species(len(g.pos), comp, np.random.default_rng(0))
+        elif self.matrix_types.get().split():
+            els = self.matrix_types.get().split()
         win = tk.Toplevel(self.root)
         win.title(f"Geometry preview — {self.surface.get()} {self.lattice.get().upper()}")
         fig = Figure(figsize=(11, 5.4), dpi=100)
@@ -1104,6 +1200,19 @@ class App:
             return num(var, name, float, 1e-9) if var.get().strip() else None
 
         pair = self.pair.get()
+        matrix, m_els = None, None
+        if self.matrix_mode.get() == "file":
+            matrix = self.matrix_path.get().strip()
+            if not matrix or not os.path.isfile(matrix):
+                raise ValueError("Step ③: choose the LAMMPS data file to carve from")
+            m_els = self.matrix_types.get().split() or list(els)
+            if sorted(m_els) != sorted(els):
+                raise ValueError(f"Step ③: the atom types of the file ({' '.join(m_els)}) must "
+                                 f"be exactly the elements ticked in step ② ({' '.join(els)})")
+            ntypes = self._matrix()["ntypes"]
+            if ntypes != len(m_els):
+                raise ValueError(f"Step ③: the data file has {ntypes} atom types but "
+                                 f"{len(m_els)} elements are listed")
         dens = num(self.density, "target density", float, 0) / 100 \
             if self.thick_mode.get() == "density" else None
         t = 0.0 if dens else num(self.t, "level-set value t")
@@ -1114,7 +1223,8 @@ class App:
             library=self.lib_path.get().strip() if pair == "meam" else "",
             params=self.par_path.get().strip() if pair == "meam" else "",
             lib_elements=lib_order if pair == "meam" else None,
-            elements=els, composition=comp, lattice=self.lattice.get(),
+            elements=m_els or els, composition=None if m_els else comp,
+            matrix=matrix, lattice=self.lattice.get(),
             n=num(self.n, "CG level n", int, 1),
             a0=num(self.a0, "a0", float, 0.5),
             auto_a0=self.auto_a0.get(), verify=self.verify.get(),
@@ -1163,6 +1273,9 @@ class App:
                          (self.rate, cfg.strain_rate), (self.seed, cfg.seed), (self.lmp, cfg.lmp),
                          (self.outdir, cfg.outdir)):
             var.set(str(val))
+        self.matrix_mode.set("file" if cfg.matrix else "lattice")
+        self.matrix_path.set(cfg.matrix or "")
+        self.matrix_types.set(" ".join(cfg.elements) if cfg.matrix else "")
         self.box_mode.set("nm" if cfg.box_nm else "cells")
         if cfg.box_nm:
             self.box_nm.set(f"{cfg.box_nm:g}")
