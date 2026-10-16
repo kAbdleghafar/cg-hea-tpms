@@ -829,6 +829,7 @@ class Config:
     crush_strain: float = 0.5
     strain_rate: float = 1e-4
     crush_axis: str = "z"
+    load: str = "compression"         # compression | tension (uniaxial loading stage)
     seed: int = 2024
     lmp: str = "lmp"
     outdir: str = "cg_hea_output"
@@ -865,6 +866,8 @@ class Config:
             err.append("sheet TPMS needs t > 0 or a target density")
         if self.matrix_species not in ("file", "random"):
             err.append("matrix_species must be 'file' or 'random'")
+        if self.load not in ("compression", "tension"):
+            err.append("load must be 'compression' or 'tension'")
         if self.crush_axis not in ("x", "y", "z"):
             err.append("crush axis must be x, y or z")
         if self.a0 is not None and self.a0 <= 0:
@@ -931,7 +934,8 @@ class Config:
         a += [f"--{k.replace('_', '-')} {getattr(self, k):g}" for k in ("dt_cg", "tdamp", "pdamp")
               if getattr(self, k)]
         if self.crush:
-            a += ["--crush", f"--crush-strain {self.crush_strain:g}",
+            a += ["--crush"] + ([f"--load {self.load}"] if self.load != "compression" else [])
+            a += [f"--crush-strain {self.crush_strain:g}",
                   f"--strain-rate {self.strain_rate:g}", f"--crush-axis {self.crush_axis}"]
         a += [f"--seed {self.seed}", f"--lmp {q(self.lmp)}", f"--outdir {q(self.outdir)}"]
         return " \\\n    ".join(a)
@@ -1395,18 +1399,25 @@ def run_pipeline(cfg: Config, session: Session = None):
         lat = [x for x in "xyz" if x != ax]
         nst = int(round(cfg.crush_strain / (cfg.strain_rate * dt)))
         if nst < 1:
-            raise ValueError("compression too short for this strain rate and timestep")
+            raise ValueError("loading stage too short for this strain rate and timestep")
+        k = 'xyz'.index(ax) + 1
+        if cfg.load == "tension":
+            strain_def, stress_def, sign = f"(l{ax}-v_l0)/v_l0", f"-c_prs[{k}]*1.0e-4", ""
+            note = "GPa, tension positive: -p (LAMMPS pressure < 0 in tension)"
+        else:
+            strain_def, stress_def, sign = f"(v_l0-l{ax})/v_l0", f"c_prs[{k}]*1.0e-4", "-"
+            note = "GPa, compression positive: LAMMPS pressure > 0 in compression"
         crush = f"""
-# ── Stage 3: uniaxial compression along {ax} (lateral {lat[0]},{lat[1]} at 0 bar) ──
+# ── Stage 3: uniaxial {cfg.load} along {ax} (lateral {lat[0]},{lat[1]} at 0 bar) ──
 # CG rate {cfg.strain_rate:g}/ps on this cell == atomistic rate {n*cfg.strain_rate:g}/ps on the L/n cell
 variable       l0 equal $(l{ax})
-variable       strain equal (v_l0-l{ax})/v_l0
+variable       strain equal {strain_def}
 compute        prs all pressure thermo_temp
-variable       stress equal c_prs[{'xyz'.index(ax)+1}]*1.0e-4        # GPa; LAMMPS pressure > 0 in compression (scale-invariant)
+variable       stress equal {stress_def}        # {note} (scale-invariant)
 fix            ss all ave/time 20 10 200 v_strain v_stress file {pre}_stress_strain.txt
 unfix          eq
 fix            baro all npt temp {Tcg:.1f} {Tcg:.1f} {tdamp:.6g} {lat[0]} 0 0 {pdamp:.6g} {lat[1]} 0 0 {pdamp:.6g}
-fix            comp all deform 1 {ax} erate -{cfg.strain_rate:g} remap x units box
+fix            comp all deform 1 {ax} erate {sign}{cfg.strain_rate:g} remap x units box
 thermo_style   custom step v_strain v_stress temp pe l{ax}
 run            {nst}
 """
@@ -1449,7 +1460,7 @@ write_data     {pre}_final.data
 """)
     log(f"[5] Wrote {outdir}{os.sep}{pre}.data and {pre}_run.in "
         f"(T_CG={Tcg:.0f} K, dt={dt:g} ps, Tdamp {tdamp:.3g} ps, Pdamp {pdamp:.3g} ps"
-        f"{f', crush {cfg.crush_axis} to {100*cfg.crush_strain:.0f}%' if cfg.crush else ''})")
+        f"{f', {cfg.load} along {cfg.crush_axis} to {100*cfg.crush_strain:.3g}%' if cfg.crush else ''})")
     summary.update(run_input=pre + "_run.in", data_file=pre + ".data", T_cg=Tcg, dt_cg=dt,
                    tdamp=tdamp, pdamp=pdamp, compression_steps=nst,
                    stress_strain=(pre + "_stress_strain.txt") if cfg.crush else None,

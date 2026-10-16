@@ -117,7 +117,9 @@ def build_parser():
     ap.add_argument("--pdamp", type=float, help="CG barostat damping, ps (default 1000*n*dt-aa)")
     ap.add_argument("--equil", type=int, help="NPT equilibration steps (default 20000)")
     ap.add_argument("--crush", action="store_true", default=None,
-                    help="add uniaxial compression stage")
+                    help="add a uniaxial loading stage (compression unless --load tension)")
+    ap.add_argument("--load", choices=["compression", "tension"],
+                    help="loading mode of the --crush stage (default compression)")
     ap.add_argument("--crush-strain", type=float)
     ap.add_argument("--strain-rate", type=float, help="1/ps")
     ap.add_argument("--crush-axis", choices=["x", "y", "z"])

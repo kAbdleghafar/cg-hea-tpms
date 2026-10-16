@@ -458,6 +458,25 @@ class TestConfig(unittest.TestCase):
         for frag in ("--lattice bcc", "--density 0.3", "--crush", "--composition 0.6 0.4"):
             self.assertIn(frag, cli)
 
+    def test_tension_stage(self):
+        tmp = tempfile.mkdtemp()
+        try:
+            pot = os.path.join(tmp, "AB.eam.alloy")
+            synthetic_setfl(pot)
+            cfg = core.Config(pair="eam", potential=pot, elements=["A", "B"], a0=3.6, n=2,
+                              cells=4, crush=True, load="tension", crush_axis="x",
+                              crush_strain=0.01, strain_rate=5e-5, outdir=tmp)
+            s = core.run_pipeline(cfg, core.Session(log=lambda *_: None))
+            run = read(os.path.join(tmp, s["run_input"]))
+            self.assertIn("variable       strain equal (lx-v_l0)/v_l0", run)
+            self.assertIn("variable       stress equal -c_prs[1]*1.0e-4", run)
+            self.assertIn("deform 1 x erate 5e-05 remap", run)
+            self.assertIn("y 0 0", run)
+            self.assertEqual(s["compression_steps"], round(0.01 / (5e-5 * 2 * 0.001)))
+            self.assertIn("--load tension", cfg.to_cli())
+        finally:
+            shutil.rmtree(tmp)
+
     def test_validation(self):
         with self.assertRaises(ValueError):
             core.Config(elements=["A"], lattice="hcp").validate()

@@ -203,6 +203,7 @@ class App:
         self.equil = S(value="20000")
         self.crush = B(value=False)
         self.crush_axis, self.crush_strain, self.rate = S(value="z"), S(value="0.5"), S(value="1e-4")
+        self.load = S(value="compression")
         self.seed = S(value="2024")
         self.lmp, self.mpi = S(value="lmp"), S(value="")
         self.outdir = S(value=os.path.abspath("cg_hea_output"))
@@ -811,7 +812,7 @@ class App:
         self._row(adv, 2, "Barostat damping", self.pdamp, 10, "ps  (default 1000·n·dt)")
         self._row(md, 3, "Random seed", self.seed, 10, "",
                   "Seeds the species assignment and the velocities (reproducible models).")
-        c = ttk.Checkbutton(md, text="Add uniaxial compression after equilibration",
+        c = ttk.Checkbutton(md, text="Add uniaxial loading after equilibration",
                             variable=self.crush, command=self._crush_state)
         c.grid(row=4, column=0, columnspan=3, sticky="w", pady=(8, 2))
         self.crush_frame = ttk.Frame(md)
@@ -825,6 +826,13 @@ class App:
         ttk.Entry(self.crush_frame, textvariable=self.rate, width=8).grid(row=0, column=5)
         ttk.Label(self.crush_frame, text="1/ps (CG)", style="Hint.TLabel").grid(row=0, column=6,
                                                                                 padx=4)
+        ttk.Label(self.crush_frame, text="mode").grid(row=1, column=0, padx=4, pady=(4, 0))
+        ttk.Combobox(self.crush_frame, textvariable=self.load, values=("compression", "tension"),
+                     width=12, state="readonly").grid(row=1, column=1, columnspan=2, sticky="w",
+                                                      pady=(4, 0))
+        wrap_label(self.crush_frame, "1/ps = 10¹² /s, e.g. 5×10⁷ /s = 5e-5 /ps (atomistic; the "
+                                     "CG rate is that divided by n)", "Hint.TLabel").grid(
+            row=1, column=3, columnspan=4, sticky="we", padx=6, pady=(4, 0))
         self._crush_state()
 
         lf = ttk.LabelFrame(p, text="LAMMPS", padding=8)
@@ -1263,6 +1271,7 @@ class App:
             equil=num(self.equil, "equilibration steps", int, 0), crush=self.crush.get(),
             crush_strain=num(self.crush_strain, "final strain", float, 0),
             strain_rate=num(self.rate, "strain rate", float, 0), crush_axis=self.crush_axis.get(),
+            load=self.load.get(),
             seed=num(self.seed, "seed", int, 0), lmp=self.lmp.get().strip() or "lmp",
             outdir=self.outdir.get().strip() or "cg_hea_output")
         cfg.validate()
@@ -1293,6 +1302,7 @@ class App:
                          (self.periods, cfg.periods), (self.min_coord, cfg.min_coord),
                          (self.temp, cfg.temp), (self.dt, cfg.dt_aa), (self.equil, cfg.equil),
                          (self.crush_axis, cfg.crush_axis), (self.crush_strain, cfg.crush_strain),
+                         (self.load, cfg.load),
                          (self.rate, cfg.strain_rate), (self.seed, cfg.seed), (self.lmp, cfg.lmp),
                          (self.outdir, cfg.outdir)):
             var.set(str(val))

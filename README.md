@@ -129,6 +129,12 @@ cd sweep && LMP="mpirun -np 32 lmp" bash run_all.sh && cd ..
 python3 examples/geometry_sweep.py summarize --outroot sweep --target 20
 ```
 
+Match the sweep to the protocol of your bulk run. For example, for a bulk tensile test along x
+at 300 K and 5×10⁷ s⁻¹, fitted between 0 and 1 %, add
+`--load tension --axis x --rate 5e-5 --strain 0.012`, and pass `--fit-window 0 0.01` to
+`summarize`. (`--load tension|compression` and `--crush-axis` exist in the main CLI and GUI as
+well.)
+
 The sweep's defaults are compression to 3 % at 10⁻³ ps⁻¹, two seeds per case, and a fit
 between 0.75 % and 2.5 %. They were tested on ~26,000-atom Ti-Zr-Nb gyroids at 300 K:
 - The box rings for the first ~0.75 % of strain after the barostat switches to lateral control.

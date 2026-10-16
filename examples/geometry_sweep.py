@@ -51,7 +51,7 @@ def generate(a):
                               composition=a.composition,
                               surface="gyroid" if surf == "bulk" else surf,
                               phase=phase, density=dens, temp=a.temp, dt_aa=a.dt_aa,
-                              equil=a.equil, crush=True, crush_strain=a.strain,
+                              equil=a.equil, crush=True, crush_strain=a.strain, load=a.load,
                               strain_rate=a.rate, crush_axis=a.axis, seed=seed, lmp=a.lmp,
                               outdir=os.path.join(a.outroot, name),
                               verify=a.verify and first, auto_a0=False)
@@ -151,6 +151,7 @@ def main():
     g.add_argument("--strain", type=float, default=0.03)
     g.add_argument("--rate", type=float, default=1e-3, help="CG strain rate, 1/ps")
     g.add_argument("--axis", default="z", choices=["x", "y", "z"])
+    g.add_argument("--load", default="compression", choices=["compression", "tension"])
     g.add_argument("--verify", action="store_true", help="verify the CG map once (n > 1)")
     g.add_argument("--lmp", default="lmp")
     g.add_argument("--outroot", default="sweep")
