@@ -187,6 +187,15 @@ A template built with another lattice constant can start under a large pressure.
 the Ti seed (a = 3.3065 Å) alloyed at random to Ti-Zr-Nb (a ≈ 3.37 Å) starts at +5.3 GPa. The
 first minimization therefore relaxes the box as well (`box/relax aniso 0`), before NPT.
 
+Voronoi grain boundaries are cut, not grown, so they start far from equilibrium.
+`--anneal-temp T` (CLI, sweep, GUI → Advanced) adds a stage after the first minimization:
+1. Heat to T, hold, and cool back. The default durations are 10, 30 and 20 ps; set them with
+   `--anneal-times HEAT HOLD COOL`. All of this runs under NPT at 0 bar.
+2. Minimize again and write `…_annealed.data`.
+3. Continue with equilibration.
+
+This relaxes the boundary structure and energy, but it doesn't change the grain size.
+
 `--matrix` reads an orthogonal LAMMPS data file: atom_style atomic, charge, molecular or full,
 as written by LAMMPS, OVITO or Atomsk. Image flags and Velocities are fine. It keeps the atoms
 inside the TPMS solid and scales the box by n.

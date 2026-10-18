@@ -825,6 +825,9 @@ class Config:
     tdamp: float = None               # CG thermostat damping, ps (default 100*n*dt_aa)
     pdamp: float = None               # CG barostat damping, ps (default 1000*n*dt_aa)
     equil: int = 20000
+    anneal_temp: float = 0.0          # anneal before equilibration, physical K (0 = off); relaxes
+                                      # as-built grain boundaries, then cools and re-minimizes
+    anneal_times: list = None         # heat, hold, cool durations in ps (default 10, 30, 20)
     crush: bool = False
     crush_strain: float = 0.5
     strain_rate: float = 1e-4
@@ -884,6 +887,12 @@ class Config:
             err.append("strain rate must be positive")
         if self.equil < 0:
             err.append("equilibration steps must be >= 0")
+        if self.anneal_temp < 0:
+            err.append("anneal temperature must be >= 0 (0 = no anneal)")
+        if self.anneal_times is not None and (len(self.anneal_times) != 3 or
+                                              min(self.anneal_times) < 0 or
+                                              sum(self.anneal_times) <= 0):
+            err.append("anneal times are three durations in ps (heat, hold, cool), >= 0")
         if not 1 <= self.seed <= 900_000_000:
             err.append("seed must be between 1 and 900000000 (LAMMPS velocity seed)")
         if err:
@@ -931,6 +940,10 @@ class Config:
             if self.matrix_species != "file":
                 a.append(f"--matrix-species {self.matrix_species}")
         a += [f"--temp {self.temp:g}", f"--dt-aa {self.dt_aa:g}", f"--equil {self.equil}"]
+        if self.anneal_temp:
+            a.append(f"--anneal-temp {self.anneal_temp:g}")
+            if self.anneal_times:
+                a.append("--anneal-times " + " ".join(f"{x:g}" for x in self.anneal_times))
         a += [f"--{k.replace('_', '-')} {getattr(self, k):g}" for k in ("dt_cg", "tdamp", "pdamp")
               if getattr(self, k)]
         if self.crush:
@@ -1423,6 +1436,29 @@ thermo_style   custom step v_strain v_stress temp pe l{ax}
 dump_modify    1 every {max(2000, nst // 10)}    # ~10 frames over the loading (big systems)
 run            {nst}
 """
+    anneal, nan = "", [0, 0, 0]
+    if cfg.anneal_temp > 0:
+        Tacg = n**3 * cfg.anneal_temp
+        th, tk, tc = cfg.anneal_times or (10.0, 30.0, 20.0)
+        nan = [int(round(n * t / dt)) for t in (th, tk, tc)]   # physical ps -> CG steps
+        ramps = [(Tcg, Tacg, nan[0], "heat"), (Tacg, Tacg, nan[1], "hold"),
+                 (Tacg, Tcg, nan[2], "cool")]
+        body = "".join(f"""fix            an all npt temp {a:.1f} {b:.1f} {tdamp:.6g} aniso 0.0 0.0 {pdamp:.6g}
+run            {k}    # {lab}
+unfix          an
+""" for a, b, k, lab in ramps if k > 0)
+        anneal = f"""
+# ── Stage 1b: anneal at physical {cfg.anneal_temp:g} K to relax the as-built grain boundaries:
+#    heat {th:g} ps, hold {tk:g} ps, cool {tc:g} ps back to {cfg.temp:g} K (NPT aniso 0 bar), re-minimize ──
+timestep       {dt:g}
+velocity       all create {Tcg:.1f} {cfg.seed + 1} mom yes rot yes dist gaussian
+thermo         1000
+thermo_style   custom step temp pe press lx ly lz
+{body}fix            br all box/relax aniso 0.0 vmax 0.001
+minimize       1.0e-10 {1e-6*n**2:.6g} 5000 50000
+unfix          br
+write_data     {pre}_annealed.data
+"""
     dt_note = ("" if not cfg.dt_cg else
                f"\n# NOTE: dt overridden ({dt:g} ps); the exact map uses n*dt_aa = {n*cfg.dt_aa:g} ps")
     with open(os.path.join(outdir, pre + "_run.in"), "w") as fh:
@@ -1446,7 +1482,7 @@ min_style      cg
 fix            br all box/relax aniso 0.0 vmax 0.001
 minimize       1.0e-10 {1e-6*n**2:.6g} 5000 50000
 unfix          br
-reset_timestep 0
+{anneal}reset_timestep 0
 timestep       {dt:g}
 
 # ── Stage 2: NPT equilibration at physical {cfg.temp:.0f} K (periodic TPMS, 0 bar) ──
@@ -1466,9 +1502,10 @@ write_data     {pre}_final.data
 """)
     log(f"[5] Wrote {outdir}{os.sep}{pre}.data and {pre}_run.in "
         f"(T_CG={Tcg:.0f} K, dt={dt:g} ps, Tdamp {tdamp:.3g} ps, Pdamp {pdamp:.3g} ps"
+        f"{f', anneal {cfg.anneal_temp:g} K' if cfg.anneal_temp > 0 else ''}"
         f"{f', {cfg.load} along {cfg.crush_axis} to {100*cfg.crush_strain:.3g}%' if cfg.crush else ''})")
     summary.update(run_input=pre + "_run.in", data_file=pre + ".data", T_cg=Tcg, dt_cg=dt,
-                   tdamp=tdamp, pdamp=pdamp, compression_steps=nst,
+                   tdamp=tdamp, pdamp=pdamp, compression_steps=nst, anneal_steps=nan,
                    stress_strain=(pre + "_stress_strain.txt") if cfg.crush else None,
                    outdir=outdir)
     cfg.to_json(os.path.join(outdir, pre + "_config.json"))

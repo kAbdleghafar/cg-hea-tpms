@@ -116,6 +116,11 @@ def build_parser():
     ap.add_argument("--tdamp", type=float, help="CG thermostat damping, ps (default 100*n*dt-aa)")
     ap.add_argument("--pdamp", type=float, help="CG barostat damping, ps (default 1000*n*dt-aa)")
     ap.add_argument("--equil", type=int, help="NPT equilibration steps (default 20000)")
+    ap.add_argument("--anneal-temp", type=float,
+                    help="anneal at this physical temperature (K) before equilibration, to relax "
+                         "as-built grain boundaries (default 0 = off)")
+    ap.add_argument("--anneal-times", type=float, nargs=3, metavar=("HEAT", "HOLD", "COOL"),
+                    help="anneal durations in ps (default 10 30 20)")
     ap.add_argument("--crush", action="store_true", default=None,
                     help="add a uniaxial loading stage (compression unless --load tension)")
     ap.add_argument("--load", choices=["compression", "tension"],

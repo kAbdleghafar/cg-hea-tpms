@@ -194,6 +194,7 @@ class App:
         self.matrix_mode, self.matrix_path, self.matrix_types = S(value="lattice"), S(), S()
         self.matrix_random = B(value=False)
         self.dt_cg, self.tdamp, self.pdamp = S(), S(), S()
+        self.anneal_temp, self.anneal_times = S(), S(value="10 30 20")
         self.phase = S(value="network")
         self.thick_mode = S(value="density")
         self.t = S(value="0.0")
@@ -810,6 +811,11 @@ class App:
                   "Nose-Hoover temperature damping time of the CG run. Times scale by n, so the "
                   "default equals the usual 100·dt of the atomistic run.")
         self._row(adv, 2, "Barostat damping", self.pdamp, 10, "ps  (default 1000·n·dt)")
+        self._row(adv, 3, "Anneal temperature", self.anneal_temp, 10, "K  (empty = no anneal)",
+                  "Optional stage after the first minimization: heat to this temperature, hold, "
+                  "cool back and minimize again. Relaxes as-built (e.g. Voronoi) grain "
+                  "boundaries before equilibration.")
+        self._row(adv, 4, "Anneal heat / hold / cool", self.anneal_times, 10, "ps")
         self._row(md, 3, "Random seed", self.seed, 10, "",
                   "Seeds the species assignment and the velocities (reproducible models).")
         c = ttk.Checkbutton(md, text="Add uniaxial loading after equilibration",
@@ -1265,6 +1271,8 @@ class App:
             box_nm=num(self.box_nm, "box edge", float, 0.1) if self.box_mode.get() == "nm" else None,
             dt_cg=opt(self.dt_cg, "CG timestep"), tdamp=opt(self.tdamp, "thermostat damping"),
             pdamp=opt(self.pdamp, "barostat damping"),
+            anneal_temp=opt(self.anneal_temp, "anneal temperature") or 0.0,
+            anneal_times=self._anneal_times() if self.anneal_temp.get().strip() else None,
             periods=num(self.periods, "periods", int, 1), phase=self.phase.get(), t=t,
             density=dens, min_coord=num(self.min_coord, "neighbour threshold", int, 0),
             temp=num(self.temp, "temperature", float, 0), dt_aa=num(self.dt, "timestep", float, 0),
@@ -1276,6 +1284,15 @@ class App:
             outdir=self.outdir.get().strip() or "cg_hea_output")
         cfg.validate()
         return cfg
+
+    def _anneal_times(self):
+        try:
+            t = [float(x) for x in self.anneal_times.get().replace(",", " ").split()]
+        except ValueError:
+            t = []
+        if len(t) != 3:
+            raise ValueError("Anneal heat / hold / cool: give three durations in ps, e.g. 10 30 20")
+        return t
 
     def _apply_config(self, cfg):
         self.pair.set(cfg.pair)
@@ -1313,6 +1330,8 @@ class App:
         self.box_mode.set("nm" if cfg.box_nm else "cells")
         if cfg.box_nm:
             self.box_nm.set(f"{cfg.box_nm:g}")
+        self.anneal_temp.set(f"{cfg.anneal_temp:g}" if cfg.anneal_temp else "")
+        self.anneal_times.set(" ".join(f"{x:g}" for x in (cfg.anneal_times or (10, 30, 20))))
         for var, val in ((self.dt_cg, cfg.dt_cg), (self.tdamp, cfg.tdamp), (self.pdamp, cfg.pdamp)):
             var.set(f"{val:g}" if val else "")
         phase, t = core.resolve_phase(cfg.phase, cfg.t)

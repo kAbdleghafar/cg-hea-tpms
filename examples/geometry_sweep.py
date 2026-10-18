@@ -57,7 +57,8 @@ def generate(a):
                               composition=a.composition,
                               surface="gyroid" if surf == "bulk" else surf,
                               periods=a.periods, phase=phase, density=dens, temp=a.temp,
-                              dt_aa=a.dt_aa, equil=a.equil, crush=True, crush_strain=a.strain, load=a.load,
+                              dt_aa=a.dt_aa, equil=a.equil, anneal_temp=a.anneal_temp,
+                              anneal_times=a.anneal_times, crush=True, crush_strain=a.strain, load=a.load,
                               strain_rate=a.rate, crush_axis=a.axis, seed=seed, lmp=a.lmp,
                               outdir=os.path.join(a.outroot, name),
                               verify=a.verify and first, auto_a0=False)
@@ -203,6 +204,10 @@ def main():
     g.add_argument("--temp", type=float, default=300.0)
     g.add_argument("--dt-aa", type=float, default=0.001)
     g.add_argument("--equil", type=int, default=10000)
+    g.add_argument("--anneal-temp", type=float, default=0.0,
+                   help="anneal at this temperature (K) before equilibration (0 = off)")
+    g.add_argument("--anneal-times", type=float, nargs=3, metavar=("HEAT", "HOLD", "COOL"),
+                   help="anneal durations in ps (default 10 30 20)")
     g.add_argument("--strain", type=float, default=0.03)
     g.add_argument("--rate", type=float, default=1e-3, help="CG strain rate, 1/ps")
     g.add_argument("--axis", default="z", choices=["x", "y", "z"])

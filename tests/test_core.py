@@ -573,6 +573,31 @@ class TestConfig(unittest.TestCase):
         finally:
             shutil.rmtree(tmp)
 
+    def test_anneal_stage(self):
+        tmp = tempfile.mkdtemp()
+        try:
+            pot = os.path.join(tmp, "AB.eam.alloy")
+            synthetic_setfl(pot)
+            cfg = core.Config(pair="eam", potential=pot, elements=["A", "B"], a0=3.6, n=2,
+                              cells=4, anneal_temp=900, anneal_times=[5, 10, 0], outdir=tmp)
+            s = core.run_pipeline(cfg, core.Session(log=lambda *_: None))
+            run = read(os.path.join(tmp, s["run_input"]))
+            # CG: temperatures x n^3 = 8, physical ps -> n*t/dt = t/dt_aa steps
+            self.assertIn("npt temp 2400.0 7200.0", run)
+            self.assertIn("npt temp 7200.0 7200.0", run)
+            self.assertNotIn("# cool", run)                              # zero-length stage
+            self.assertEqual(s["anneal_steps"], [5000, 10000, 0])
+            self.assertLess(run.index("_annealed.data"), run.index("reset_timestep 0"))
+            self.assertIn("--anneal-temp 900", cfg.to_cli())
+            off = core.Config(pair="eam", potential=pot, elements=["A", "B"], a0=3.6, n=2,
+                              cells=4, outdir=os.path.join(tmp, "off"))
+            s2 = core.run_pipeline(off, core.Session(log=lambda *_: None))
+            self.assertNotIn("Stage 1b", read(os.path.join(s2["outdir"], s2["run_input"])))
+            with self.assertRaises(ValueError):
+                core.Config(elements=["A"], anneal_times=[1, 2]).validate()
+        finally:
+            shutil.rmtree(tmp)
+
     def test_validation(self):
         with self.assertRaises(ValueError):
             core.Config(elements=["A"], lattice="hcp").validate()
