@@ -172,6 +172,12 @@ python3 examples/geometry_sweep.py generate ... --matrix examples/polycrystal/po
 python3 examples/geometry_sweep.py summarize --outroot sweep_30nm sweep_40nm --fit-window 0 0.01
 ```
 
+The bulk reference can also come from a different template than the lattices, for example a
+30 nm bulk for 40 nm cells with the same grain size:
+1. Generate the bulk on its own with `--surfaces --sheet` (no lattices).
+2. Generate the lattices with `--no-bulk`.
+3. Run `summarize --outroot lattices --bulk-root bulk`.
+
 With several `--outroot`s, `summarize` reports each sweep and then a size-effect table. That
 table lists E/E_bulk per architecture and density at each cell size, with the spread between
 sizes. A spread within the seed-to-seed scatter means the result carries over to larger

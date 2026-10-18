@@ -460,6 +460,57 @@ class TestGeometrySweep(unittest.TestCase):
             shutil.rmtree(tmp)
 
 
+class TestSweepSeparateBulk(unittest.TestCase):
+    """A bulk-only sweep plus a lattice sweep with --no-bulk, joined by summarize --bulk-root."""
+
+    def test_bulk_root(self):
+        import subprocess
+        tmp = tempfile.mkdtemp()
+        try:
+            pot = os.path.join(tmp, "AB.eam.alloy")
+            synthetic_setfl(pot)
+            t = core.assign_species(2 * 8**3, [0.5, 0.5], np.random.default_rng(0))
+            mat = os.path.join(tmp, "m.data")
+            core.write_data(mat, core.lattice("bcc", 3.3, 8), t, 8 * 3.3, [50.0, 70.0], "m")
+            script = os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "examples",
+                                  "geometry_sweep.py")
+            base = [sys.executable, script, "generate", "--pair", "eam", "--potential", pot,
+                    "--elements", "A", "B", "--matrix", mat, "--seeds", "1", "--load",
+                    "compression", "--strain", "0.05", "--rate", "5e-5"]
+            bulk, lat = os.path.join(tmp, "bulk"), os.path.join(tmp, "lat")
+            out = subprocess.run(base + ["--surfaces", "--sheet", "--outroot", bulk],
+                                 capture_output=True, text=True)
+            self.assertEqual(out.returncode, 0, out.stderr)
+            self.assertEqual([d for d in os.listdir(bulk) if os.path.isdir(os.path.join(bulk, d))],
+                             ["bulk_s1"])
+            out = subprocess.run(base + ["--surfaces", "gyroid", "--sheet", "--densities", "0.4",
+                                         "0.6", "--no-bulk", "--outroot", lat],
+                                 capture_output=True, text=True)
+            self.assertEqual(out.returncode, 0, out.stderr)
+            runs = sorted(d for d in os.listdir(lat) if os.path.isdir(os.path.join(lat, d)))
+            self.assertEqual(runs, ["gyroid_network_rho040_s1", "gyroid_network_rho060_s1"])
+            for root, d in [(bulk, "bulk_s1")] + [(lat, r) for r in runs]:
+                s = json.loads(read(os.path.join(root, d, [f for f in os.listdir(
+                    os.path.join(root, d)) if f.endswith("_summary.json")][0])))
+                self.assertEqual(s["compression_steps"], round(0.05 / (5e-5 * 0.001)))
+                E = 60.0 if d.startswith("bulk") else 60.0 * 0.5 * s["fill"]**2   # C 0.5, m 2
+                eps = np.linspace(0, 0.05, 101)
+                write(os.path.join(root, d, s["prefix"] + "_stress_strain.txt"),
+                      "# t\n# TimeStep v_strain v_stress\n" +
+                      "".join(f"{i} {e} {E * e}\n" for i, e in enumerate(eps)))
+            out = subprocess.run([sys.executable, script, "summarize", "--outroot", lat,
+                                  "--bulk-root", bulk, "--fit-window", "0", "0.01"],
+                                 capture_output=True, text=True)
+            self.assertEqual(out.returncode, 0, out.stderr)
+            self.assertIn("E_bulk = 60.00 GPa from", out.stdout)
+            self.assertIn("C = 0.500  m = 2.00", out.stdout)
+            out = subprocess.run(base + ["--surfaces", "--sheet", "--no-bulk", "--outroot",
+                                         os.path.join(tmp, "none")], capture_output=True, text=True)
+            self.assertNotEqual(out.returncode, 0)
+        finally:
+            shutil.rmtree(tmp)
+
+
 @unittest.skipUnless(__import__("importlib").util.find_spec("scipy"), "needs SciPy")
 class TestRemoveDoubles(unittest.TestCase):
     """examples/remove_doubles.py: Atomsk's -rmd rule (earlier atom stays, periodic box)."""

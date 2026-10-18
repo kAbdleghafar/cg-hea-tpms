@@ -37,9 +37,11 @@ import cg_hea_core as core
 
 
 def generate(a):
-    cases = [("bulk", "network", 1.0)]
+    cases = [] if a.no_bulk else [("bulk", "network", 1.0)]
     cases += [(s, "network", d) for s in a.surfaces for d in a.densities]
     cases += [(s, "sheet", d) for s in (a.sheet or []) for d in a.densities]
+    if not cases:
+        sys.exit("nothing to generate: --no-bulk without --surfaces or --sheet")
     os.makedirs(a.outroot, exist_ok=True)
     lines = ["#!/bin/bash", "# edit to your LAMMPS command, e.g. LMP='mpirun -np 32 lmp'",
              f"LMP=${{LMP:-'{a.lmp}'}}", "set -e"]
@@ -93,10 +95,11 @@ def collect(outroot, fit_window):
     return rows, cell
 
 
-def summarize_one(outroot, rows, cell, target):
+def summarize_one(outroot, rows, cell, target, Eb_ref=None):
     bulk = [r["E"] for r in rows if r["arch"] == "bulk"]
-    Eb = float(np.mean(bulk)) if bulk else None
-    print(f"\n== {outroot}" + (f"  (TPMS cell {cell:.3g} nm)" if cell else ""))
+    Eb = float(np.mean(bulk)) if bulk else Eb_ref
+    print(f"\n== {outroot}" + (f"  (TPMS cell {cell:.3g} nm)" if cell else "")
+          + ("" if bulk or Eb is None else f"  [E_bulk {Eb:.2f} GPa from --bulk-root]"))
     print(f"{'architecture':24s} {'rho':>6s} {'E (GPa)':>14s} {'E/E_bulk':>9s}  seeds")
     groups = {}
     for r in rows:
@@ -134,13 +137,21 @@ def summarize_one(outroot, rows, cell, target):
 
 
 def summarize(a):
+    Eb_ref = None
+    if a.bulk_root:                       # bulk reference from another sweep (e.g. bulk only)
+        ref = [r["E"] for r in collect(a.bulk_root, a.fit_window)[0] if r["arch"] == "bulk"]
+        if not ref:
+            sys.exit(f"{a.bulk_root}: no finished bulk run")
+        Eb_ref = float(np.mean(ref))
+        print(f"E_bulk = {Eb_ref:.2f} GPa from {a.bulk_root} ({len(ref)} run(s)), used where a "
+              f"sweep has no bulk run of its own")
     tables = {}
     for root in a.outroot:
         rows, cell = collect(root, a.fit_window)
         if not rows:
             print(f"{root}: no finished runs found")
             continue
-        tables[root] = (cell, summarize_one(root, rows, cell, a.target))
+        tables[root] = (cell, summarize_one(root, rows, cell, a.target, Eb_ref))
     if not tables:
         sys.exit("no finished runs found")
     if len(tables) < 2:
@@ -180,8 +191,11 @@ def main():
     g.add_argument("--lattice", default="bcc", choices=list(core.LATTICES))
     g.add_argument("-n", type=int, default=1, help="CG level (1 = atomistic)")
     g.add_argument("--a0", type=float, default=None, help="only used for the neighbour skin")
-    g.add_argument("--surfaces", nargs="+", default=["gyroid", "diamond", "primitive", "iwp"])
+    g.add_argument("--surfaces", nargs="*", default=["gyroid", "diamond", "primitive", "iwp"],
+                   help="network surfaces (none: only the bulk and --sheet)")
     g.add_argument("--sheet", nargs="*", default=["gyroid"], help="surfaces also run as sheets")
+    g.add_argument("--no-bulk", action="store_true",
+                   help="skip the bulk run (take E_bulk from another sweep: summarize --bulk-root)")
     g.add_argument("--densities", nargs="+", type=float, default=[0.25, 0.35, 0.5])
     g.add_argument("--periods", type=int, default=1,
                    help="TPMS cells along the shortest box edge (cell size = that edge / periods)")
@@ -201,6 +215,7 @@ def main():
                    help="one sweep, or several with different TPMS cell sizes to compare")
     s.add_argument("--fit-window", nargs=2, type=float, default=(0.0075, 0.025))
     s.add_argument("--target", type=float, help="target modulus, GPa (e.g. 20 for bone)")
+    s.add_argument("--bulk-root", help="sweep whose bulk run(s) give E_bulk for sweeps without one")
     a = ap.parse_args()
     generate(a) if a.cmd == "generate" else summarize(a)
 

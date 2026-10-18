@@ -1361,9 +1361,10 @@ def run_pipeline(cfg: Config, session: Session = None):
         phase, level, fill, surf, pruned = geo.phase, geo.level, geo.fill, geo.surface_fraction, geo.pruned
         src = f"on a CG-{kind.upper()} lattice"
     L = float(Lv.max())
-    pre = f"{cfg.surface}_{kind}_{tag}_cgn{n}" + ("_matrix" if mat is not None else "")
+    label = "bulk" if fill >= 1.0 else cfg.surface      # density 1: nothing carved
+    pre = f"{label}_{kind}_{tag}_cgn{n}" + ("_matrix" if mat is not None else "")
     write_data(os.path.join(outdir, pre + ".data"), pos, types, Lv, m_cg,
-               f"CG n={n} {kind.upper()} {cfg.surface} {tag} composition "
+               f"CG n={n} {kind.upper()} {label} {tag} composition "
                f"{[round(c, 6) for c in comp]}")
     frac = ", ".join(f"{e} {np.mean(types == i+1):.3f}" for i, e in enumerate(els))
     lev = f"|f| <= {level:.4g}" if phase == "sheet" else f"f <= {level:.4g}"
@@ -1425,7 +1426,7 @@ run            {nst}
     dt_note = ("" if not cfg.dt_cg else
                f"\n# NOTE: dt overridden ({dt:g} ps); the exact map uses n*dt_aa = {n*cfg.dt_aa:g} ps")
     with open(os.path.join(outdir, pre + "_run.in"), "w") as fh:
-        fh.write(f"""# CG n={n} {kind.upper()} {cfg.surface} {tag} (composition {[round(c, 6) for c in comp]})
+        fh.write(f"""# CG n={n} {kind.upper()} {label} {tag} (composition {[round(c, 6) for c in comp]})
 # Exact CG map: thermostat T_CG = n^3 * {cfg.temp:.0f} K = {Tcg:.0f} K ; dt = n * {cfg.dt_aa} ps{dt_note}
 # Atom types: {'  '.join(f'{i}={e}' for i, e in enumerate(els, 1))}
 units          metal
