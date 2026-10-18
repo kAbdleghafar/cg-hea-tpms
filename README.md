@@ -23,7 +23,9 @@ all-atom specimen; size effects are those of the `L/n` cell.
 | `cg_hea_gui.py` | Graphical interface (Tkinter, no extra install) |
 | `cg_hea_tpms.py` | Command line; opens the GUI when run without arguments |
 | `cg_hea_core.py` | Engine shared by both: potential rescaling, FCC/BCC lattices, checks, TPMS, LAMMPS inputs |
-| `examples/geometry_sweep.py` | Architecture-vs-bulk study: generate a sweep from your structure, then fit E, E/E_bulk and Gibson-Ashby scaling |
+| `examples/geometry_sweep.py` | Architecture-vs-bulk study: generate a sweep from your structure, then fit E, E/E_bulk and Gibson-Ashby scaling; compare sweeps at different TPMS cell sizes |
+| `examples/polycrystal/` | Atomsk recipe for 30 nm and 40 nm BCC polycrystal templates (same grain size), with the exact grain files used |
+| `examples/remove_doubles.py` | Fast equivalent of Atomsk's `-rmd` (remove-doubles) for multi-million-atom templates (needs SciPy) |
 | `tests/test_core.py` | Unit tests plus FCC/BCC LAMMPS integration tests |
 | `docs/` | Screenshots and an example stress-strain plot |
 | `LICENSE`, `CITATION.cff` | MIT license; citation metadata ("Cite this repository" on GitHub) |
@@ -145,6 +147,40 @@ between 0.75 % and 2.5 %. They were tested on ~26,000-atom Ti-Zr-Nb gyroids at 3
 
 Check every stress-strain curve anyway.
 
+### Size effect: the same architectures at two TPMS cell sizes
+
+At a fixed density, strut thickness is a fixed fraction of the cell. For example, gyroid-network
+struts are ~0.43 cells thick at ρ = 0.5, and gyroid-sheet walls ~0.18. Small cells therefore
+have a large share of surface atoms. To check that E/E_bulk no longer depends on size, run the
+same sweep at two cell sizes:
+
+1. Build cubic polycrystals with the same mean grain size, one TPMS cell per box. The recipe
+   in `examples/polycrystal/` gives 30 nm (9 grains) and 40 nm (21 grains), using a pure-Ti
+   BCC seed (`BCC_Ti.xsf`).
+2. Atomsk's `-rmd 2.0` is slow on millions of atoms (over an hour for 1.5 M atoms on 4 cores).
+   `examples/remove_doubles.py` applies the same rule in seconds.
+
+```bash
+cd examples/polycrystal
+atomsk --polycrystal BCC_Ti.xsf polycrystal_30nm.txt raw30.lmp -wrap   # random grains, or
+atomsk --polycrystal BCC_Ti.xsf grains_30nm.txt raw30.lmp -wrap        # the exact grains used here
+python3 ../remove_doubles.py raw30.lmp poly30nm.lmp 2.0                # = Atomsk -rmd 2.0
+cd ../..
+# one sweep per cell size (--periods 1: the TPMS cell is the box), then compare them
+python3 examples/geometry_sweep.py generate ... --matrix examples/polycrystal/poly30nm.lmp \
+    --matrix-species random --periods 1 --densities 0.4 0.5 0.6 --outroot sweep_30nm
+python3 examples/geometry_sweep.py summarize --outroot sweep_30nm sweep_40nm --fit-window 0 0.01
+```
+
+With several `--outroot`s, `summarize` reports each sweep and then a size-effect table. That
+table lists E/E_bulk per architecture and density at each cell size, with the spread between
+sizes. A spread within the seed-to-seed scatter means the result carries over to larger
+lattices.
+
+A template built with another lattice constant can start under a large pressure. For example,
+the Ti seed (a = 3.3065 Å) alloyed at random to Ti-Zr-Nb (a ≈ 3.37 Å) starts at +5.3 GPa. The
+first minimization therefore relaxes the box as well (`box/relax aniso 0`), before NPT.
+
 `--matrix` reads an orthogonal LAMMPS data file: atom_style atomic, charge, molecular or full,
 as written by LAMMPS, OVITO or Atomsk. Image flags and Velocities are fine. It keeps the atoms
 inside the TPMS solid and scales the box by n.
@@ -156,8 +192,9 @@ inside the TPMS solid and scales the box by n.
 - **Non-cubic boxes:** the TPMS unit cells stay cubic. A 30 × 30 × 10 nm box gets 3 × 3 × 1
   cells of 10 nm.
 - **Equilibration:** NPT equilibration is anisotropic (`aniso`), which suits textured
-  polycrystals. In the GUI the same option is under ③ *Solid to carve the TPMS from*. `--analyze`
-fits the apparent Young's modulus of each run, with its relative density. The elastic modulus
+  polycrystals. In the GUI the same option is under ③ *Solid to carve the TPMS from*.
+
+`--analyze` fits the apparent Young's modulus of each run, with its relative density. The elastic modulus
 is size-independent, so it is the property that transfers best through the CG map.
 
 ## What FCC vs BCC changes

@@ -419,29 +419,72 @@ class TestGeometrySweep(unittest.TestCase):
             script = os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "examples",
                                   "geometry_sweep.py")
             root = os.path.join(tmp, "sw")
-            out = subprocess.run([sys.executable, script, "generate", "--pair", "eam",
-                                  "--potential", pot, "--elements", "A", "B", "--matrix", mat,
-                                  "--surfaces", "gyroid", "--sheet", "--densities", "0.3", "0.5",
-                                  "--seeds", "1", "--outroot", root],
-                                 capture_output=True, text=True)
-            self.assertEqual(out.returncode, 0, out.stderr)
-            runs = sorted(d for d in os.listdir(root) if os.path.isdir(os.path.join(root, d)))
-            self.assertEqual(runs, ["bulk_s1", "gyroid_network_rho030_s1",
-                                    "gyroid_network_rho050_s1"])
-            self.assertEqual(read(os.path.join(root, "run_all.sh")).count("$LMP -in"), 3)
-            for d in runs:
-                s = json.loads(read(os.path.join(root, d, [f for f in os.listdir(
-                    os.path.join(root, d)) if f.endswith("_summary.json")][0])))
-                E = 50.0 if d.startswith("bulk") else 50.0 * 0.6 * s["fill"]**2   # C 0.6, m 2
-                eps = np.linspace(0, 0.03, 61)
-                write(os.path.join(root, d, s["prefix"] + "_stress_strain.txt"),
-                      "# t\n# TimeStep v_strain v_stress\n" +
-                      "".join(f"{i} {e} {E * e}\n" for i, e in enumerate(eps)))
+            def sweep(root, periods, stiffer):
+                out = subprocess.run([sys.executable, script, "generate", "--pair", "eam",
+                                      "--potential", pot, "--elements", "A", "B", "--matrix", mat,
+                                      "--surfaces", "gyroid", "--sheet", "--densities", "0.3",
+                                      "0.5", "--seeds", "1", "--periods", str(periods),
+                                      "--outroot", root], capture_output=True, text=True)
+                self.assertEqual(out.returncode, 0, out.stderr)
+                runs = sorted(d for d in os.listdir(root) if os.path.isdir(os.path.join(root, d)))
+                self.assertEqual(runs, ["bulk_s1", "gyroid_network_rho030_s1",
+                                        "gyroid_network_rho050_s1"])
+                self.assertEqual(read(os.path.join(root, "run_all.sh")).count("$LMP -in"), 3)
+                for d in runs:
+                    s = json.loads(read(os.path.join(root, d, [f for f in os.listdir(
+                        os.path.join(root, d)) if f.endswith("_summary.json")][0])))
+                    self.assertEqual(s["tpms_periods"], [periods] * 3)
+                    E = 50.0 if d.startswith("bulk") else stiffer * 50.0 * 0.6 * s["fill"]**2
+                    eps = np.linspace(0, 0.03, 61)                            # C 0.6, m 2
+                    write(os.path.join(root, d, s["prefix"] + "_stress_strain.txt"),
+                          "# t\n# TimeStep v_strain v_stress\n" +
+                          "".join(f"{i} {e} {E * e}\n" for i, e in enumerate(eps)))
+
+            sweep(root, 1, 1.0)
             out = subprocess.run([sys.executable, script, "summarize", "--outroot", root,
                                   "--target", "5"], capture_output=True, text=True)
             self.assertEqual(out.returncode, 0, out.stderr)
             self.assertIn("C = 0.600  m = 2.00", out.stdout)
             self.assertIn("rho = 0.408 for E* = 5 GPa", out.stdout)   # (5/30)^(1/2)
+            self.assertNotIn("Size effect", out.stdout)
+            # a second sweep with half the TPMS cell, 10 % stiffer lattices: size-effect table
+            root2 = os.path.join(tmp, "sw2")
+            sweep(root2, 2, 1.1)
+            out = subprocess.run([sys.executable, script, "summarize", "--outroot", root, root2],
+                                 capture_output=True, text=True)
+            self.assertEqual(out.returncode, 0, out.stderr)
+            self.assertIn("2.64 nm   1.32 nm", out.stdout)
+            # same fill (0.30 in both) -> 0.1 / 1.05 = 9.5 %
+            self.assertRegex(out.stdout, r"gyroid_network\s+0\.30\s+0\.055\s+0\.060\s+9\.5 %")
+        finally:
+            shutil.rmtree(tmp)
+
+
+@unittest.skipUnless(__import__("importlib").util.find_spec("scipy"), "needs SciPy")
+class TestRemoveDoubles(unittest.TestCase):
+    """examples/remove_doubles.py: Atomsk's -rmd rule (earlier atom stays, periodic box)."""
+
+    def test_doubles_removed(self):
+        import subprocess
+        tmp = tempfile.mkdtemp()
+        try:
+            a, nc = 3.3, 4
+            lat = core.lattice("bcc", a, nc)
+            L = nc * a
+            extra = lat[[0, 5, 9]] + [0.3, 0.0, 0.0]               # doubles after the originals
+            edge = np.array([[L - 0.2, lat[0, 1], lat[0, 2]]])        # double of atom 0 across x
+            pos = np.vstack([lat, extra, edge])
+            src, dst = os.path.join(tmp, "in.lmp"), os.path.join(tmp, "out.lmp")
+            core.write_data(src, pos, np.ones(len(pos), int), L, [47.867], "doubles")
+            script = os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "examples",
+                                  "remove_doubles.py")
+            out = subprocess.run([sys.executable, script, src, dst, "2.0"], capture_output=True,
+                                 text=True)
+            self.assertEqual(out.returncode, 0, out.stderr)
+            self.assertIn("removed 4, kept 128", out.stdout)
+            m = core.read_lammps_data(dst)
+            self.assertEqual(len(m["pos"]), len(lat))
+            np.testing.assert_allclose(m["pos"], lat, atol=1e-9)
         finally:
             shutil.rmtree(tmp)
 
@@ -473,6 +516,8 @@ class TestConfig(unittest.TestCase):
             self.assertIn("deform 1 x erate 5e-05 remap", run)
             self.assertIn("y 0 0", run)
             self.assertEqual(s["compression_steps"], round(0.01 / (5e-5 * 2 * 0.001)))
+            self.assertIn("dump_modify    1 every 10000 ", run)       # 100,000 steps / 10
+            self.assertIn("fix            br all box/relax aniso 0.0", run)
             self.assertIn("--load tension", cfg.to_cli())
         finally:
             shutil.rmtree(tmp)

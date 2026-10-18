@@ -12,6 +12,11 @@ cg_hea_runs/
 log.lammps
 log.cite
 
+# large structure files (rebuild them from examples/polycrystal/)
+*.lmp
+*.cfg
+sweep*/
+
 # interatomic potentials are third-party files: keep them out of the repository
 *.eam.alloy
 *.eam.fs

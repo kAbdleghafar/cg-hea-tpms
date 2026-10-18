@@ -1419,6 +1419,7 @@ unfix          eq
 fix            baro all npt temp {Tcg:.1f} {Tcg:.1f} {tdamp:.6g} {lat[0]} 0 0 {pdamp:.6g} {lat[1]} 0 0 {pdamp:.6g}
 fix            comp all deform 1 {ax} erate {sign}{cfg.strain_rate:g} remap x units box
 thermo_style   custom step v_strain v_stress temp pe l{ax}
+dump_modify    1 every {max(2000, nst // 10)}    # ~10 frames over the loading (big systems)
 run            {nst}
 """
     dt_note = ("" if not cfg.dt_cg else
@@ -1437,9 +1438,13 @@ neighbor       {0.1*a_cg:.3f} bin
 neigh_modify   every 1 delay 0 check yes
 
 # ── Stage 1: minimize (relative energy tol. 1e-10, or forces < 1e-6 eV/Å in physical units:
-#    CG forces scale as n^2; the cap keeps rugged random-alloy surfaces from stalling) ──
+#    CG forces scale as n^2; the cap keeps rugged random-alloy surfaces from stalling).
+#    The box relaxes to 0 bar as well, so a template built with another lattice constant
+#    (e.g. a pure-Ti polycrystal alloyed at random) starts NPT without a large pressure ──
 min_style      cg
+fix            br all box/relax aniso 0.0 vmax 0.001
 minimize       1.0e-10 {1e-6*n**2:.6g} 5000 50000
+unfix          br
 reset_timestep 0
 timestep       {dt:g}
 
