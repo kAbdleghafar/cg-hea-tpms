@@ -164,6 +164,9 @@ same sweep at two cell sizes:
 cd examples/polycrystal
 atomsk --polycrystal BCC_Ti.xsf polycrystal_30nm.txt raw30.lmp -wrap   # random grains, or
 atomsk --polycrystal BCC_Ti.xsf grains_30nm.txt raw30.lmp -wrap        # the exact grains used here
+# grains_30nm_A/B/C.txt: three more 9-grain 30 nm polycrystals (statistics over grain sets)
+# single crystals with [hkl] along x, e.g. [111]:
+#   atomsk --create bcc 3.3065 Ti orient [111] [-110] [-1-12] -duplicate 77 47 27 xtal111.lmp
 python3 ../remove_doubles.py raw30.lmp poly30nm.lmp 2.0                # = Atomsk -rmd 2.0
 cd ../..
 # one sweep per cell size (--periods 1: the TPMS cell is the box), then compare them
